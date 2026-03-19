@@ -23,3 +23,10 @@ botpy.log
 nano.*.save
 .DS_Store
 uv.lock
+
+.pyi-temp/
+.desktop-data/
+.desktop-data-exe/
+desktop/src-tauri/target/
+desktop/build/
+desktop/dist/

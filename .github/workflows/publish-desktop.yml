@@ -1,0 +1,75 @@
+name: Publish Desktop
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish-windows:
+    runs-on: windows-latest
+    env:
+      NANOBOT_DESKTOP_UPDATER_ENDPOINT: https://github.com/${{ github.repository }}/releases/latest/download/latest.json
+      NANOBOT_DESKTOP_UPDATER_PUBKEY: ${{ secrets.DESKTOP_UPDATER_PUBKEY }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Validate updater signing inputs
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:NANOBOT_DESKTOP_UPDATER_PUBKEY)) {
+            throw "Missing secret DESKTOP_UPDATER_PUBKEY"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw "Missing secret TAURI_SIGNING_PRIVATE_KEY"
+          }
+
+      - name: Install Python dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e . pyinstaller
+
+      - name: Prepare updater config
+        shell: pwsh
+        run: python desktop/scripts/prepare_release_config.py
+
+      - name: Build bundled Python executables
+        shell: pwsh
+        run: |
+          python desktop/build_backend.py
+          python desktop/build_runtime.py
+
+      - name: Publish Windows desktop release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ env.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          NANOBOT_DESKTOP_UPDATER_ENDPOINT: ${{ env.NANOBOT_DESKTOP_UPDATER_ENDPOINT }}
+          NANOBOT_DESKTOP_UPDATER_PUBKEY: ${{ env.NANOBOT_DESKTOP_UPDATER_PUBKEY }}
+        with:
+          projectPath: desktop
+          tauriScript: cargo tauri
+          tagName: desktop-v__VERSION__
+          releaseName: Nanobot Desktop v__VERSION__
+          releaseBody: Windows desktop build for Nanobot. The updater feed is published as latest.json.
+          releaseDraft: true
+          prerelease: false
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
+
+
