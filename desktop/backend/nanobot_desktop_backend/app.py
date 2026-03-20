@@ -47,6 +47,16 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
     state: DesktopState
     ui_root = Path(__file__).resolve().parents[2] / "ui"
 
+    def end_headers(self) -> None:
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
+        super().end_headers()
+
+    def do_OPTIONS(self) -> None:
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self.end_headers()
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/api/health":
@@ -172,4 +182,3 @@ def main() -> None:
         pass
     finally:
         server.server_close()
-

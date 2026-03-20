@@ -39,6 +39,23 @@
       <section id="content" class="content"></section>
     </main>
   </div>
-  <script type="module" src="./app.js"></script>
+  <script>
+    (function () {
+      var saveState = document.getElementById('saveState');
+      var gatewayLabel = document.getElementById('gatewayLabel');
+      if (saveState) saveState.textContent = 'inline script ok';
+      window.addEventListener('error', function (event) {
+        if (saveState) saveState.textContent = 'JS Error: ' + event.message;
+        if (gatewayLabel) gatewayLabel.textContent = 'JS Error';
+      });
+      window.addEventListener('unhandledrejection', function (event) {
+        var reason = event.reason;
+        var message = reason && reason.message ? reason.message : String(reason);
+        if (saveState) saveState.textContent = 'Promise Error: ' + message;
+        if (gatewayLabel) gatewayLabel.textContent = 'Promise Error';
+      });
+    })();
+  </script>
+  <script defer src="./app.js" onerror="document.getElementById('saveState').textContent='app.js load failed'; document.getElementById('gatewayLabel').textContent='Script Load Failed';"></script>
 </body>
 </html>

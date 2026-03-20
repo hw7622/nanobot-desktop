@@ -22,7 +22,11 @@ const API_BASE = (() => {
   if (typeof window !== "undefined" && typeof window.__NANOBOT_API_BASE__ === "string") {
     return window.__NANOBOT_API_BASE__;
   }
-  if (typeof location !== "undefined" && location.protocol.startsWith("http")) {
+  if (
+    typeof location !== "undefined" &&
+    (location.hostname === "127.0.0.1" || location.hostname === "localhost") &&
+    location.port === "18791"
+  ) {
     return "";
   }
   return "http://127.0.0.1:18791";
@@ -66,7 +70,7 @@ async function refreshBootstrapWithRetry() {
       return;
     } catch (error) {
       lastError = error;
-      state.bootstrapError = `正在等待桌面后端启动...（第 ${attempt + 1} 次）`;
+      state.bootstrapError = `正在等待桌面后端启动...（第 ${attempt + 1} 次）：${error.message || error}`;
       renderShellLoading();
       await sleep(1000);
     }
@@ -530,7 +534,7 @@ function fallbackUpdaterState(note, supported = true) {
     channel: "stable",
     endpoint: "https://github.com/hw7622/nanobot-desktop/releases/latest/download/latest.json",
     pubkeyConfigured: false,
-    currentVersion: state.bootstrap?.meta?.desktopVersion || "0.1.0",
+    currentVersion: "0.1.0",
     pending: null,
     note,
   };
@@ -595,3 +599,6 @@ function escAttr(value) {
 function sleep(ms) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
+
+
+
