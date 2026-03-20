@@ -15,6 +15,7 @@ const state = {
   logs: [],
   updater: fallbackUpdaterState("正在读取更新状态..."),
   updaterBusy: "",
+  bootstrapError: "",
 };
 
 const API_BASE = (() => {
@@ -44,9 +45,47 @@ init();
 
 async function init() {
   els.saveBtn.addEventListener("click", saveConfig);
-  await refreshBootstrap();
-  await refreshUpdaterState();
-  setInterval(refreshRuntime, 5000);
+  renderShellLoading();
+  try {
+    await refreshBootstrapWithRetry();
+    await refreshUpdaterState();
+    setInterval(refreshRuntime, 5000);
+  } catch (error) {
+    state.bootstrapError = `桌面后端尚未就绪：${error.message || error}`;
+    renderShellLoading();
+    scheduleBootstrapRetry();
+  }
+}
+
+async function refreshBootstrapWithRetry() {
+  let lastError = null;
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    try {
+      await refreshBootstrap();
+      state.bootstrapError = "";
+      return;
+    } catch (error) {
+      lastError = error;
+      state.bootstrapError = `正在等待桌面后端启动...（第 ${attempt + 1} 次）`;
+      renderShellLoading();
+      await sleep(1000);
+    }
+  }
+  throw lastError || new Error("无法连接桌面后端");
+}
+
+function scheduleBootstrapRetry() {
+  window.setTimeout(async () => {
+    try {
+      await refreshBootstrapWithRetry();
+      await refreshUpdaterState();
+      setInterval(refreshRuntime, 5000);
+    } catch (error) {
+      state.bootstrapError = `桌面后端启动失败：${error.message || error}`;
+      renderShellLoading();
+      scheduleBootstrapRetry();
+    }
+  }, 3000);
 }
 
 async function refreshBootstrap() {
@@ -59,12 +98,18 @@ async function refreshBootstrap() {
 
 async function refreshRuntime() {
   if (!state.bootstrap) return;
-  const payload = await fetchJson("/api/bootstrap");
-  state.bootstrap.status = payload.status;
-  state.bootstrap.skills = payload.skills;
-  await refreshLogs();
-  renderHeader();
-  if (state.tab === "overview" || state.tab === "runtime" || state.tab === "skills") renderBody();
+  try {
+    const payload = await fetchJson("/api/bootstrap");
+    state.bootstrap.status = payload.status;
+    state.bootstrap.skills = payload.skills;
+    await refreshLogs();
+    renderHeader();
+    if (state.tab === "overview" || state.tab === "runtime" || state.tab === "skills") renderBody();
+  } catch (error) {
+    state.bootstrapError = `运行状态刷新失败：${error.message || error}`;
+    renderHeader();
+    if (state.tab === "overview" || state.tab === "runtime") renderBody();
+  }
 }
 
 async function refreshLogs() {
@@ -87,6 +132,10 @@ async function refreshUpdaterState() {
 }
 
 async function saveConfig() {
+  if (!state.draft) {
+    window.alert("桌面后端尚未就绪，请稍等几秒后重试。");
+    return;
+  }
   const payload = await fetchJson("/api/config", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -138,6 +187,17 @@ function render() {
   renderBody();
 }
 
+function renderShellLoading() {
+  els.title.textContent = "概览";
+  els.gatewayDot.className = "status-dot";
+  els.gatewayLabel.textContent = state.bootstrapError || "正在启动桌面后端...";
+  els.versionMeta.textContent = state.updater?.currentVersion ? `Desktop ${state.updater.currentVersion}` : "正在准备运行环境";
+  els.nav.innerHTML = "";
+  els.saveBtn.disabled = true;
+  els.saveState.textContent = state.bootstrapError || "等待桌面后端响应";
+  els.content.innerHTML = `<div class="empty startup-empty">${esc(state.bootstrapError || "正在初始化控制台，请稍候几秒...")}</div>`;
+}
+
 function renderNav() {
   els.nav.innerHTML = tabs.map(([id, label, hint]) => `
     <button class="nav-button ${state.tab === id ? "active" : ""}" data-tab="${id}">
@@ -154,7 +214,10 @@ function renderNav() {
 }
 
 function renderHeader() {
-  if (!state.bootstrap) return;
+  if (!state.bootstrap) {
+    renderShellLoading();
+    return;
+  }
   const current = tabs.find(([id]) => id === state.tab);
   const running = Boolean(state.bootstrap.status.running);
   els.title.textContent = current?.[1] || "概览";
@@ -169,7 +232,7 @@ function renderHeader() {
 
 function renderBody() {
   if (!state.bootstrap || !state.draft) {
-    els.content.innerHTML = `<div class="empty">正在加载控制台数据...</div>`;
+    renderShellLoading();
     return;
   }
   const pages = {
@@ -527,4 +590,8 @@ function esc(value) {
 
 function escAttr(value) {
   return esc(value).replaceAll("'", "&#39;");
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }

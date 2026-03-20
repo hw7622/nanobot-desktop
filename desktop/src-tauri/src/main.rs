@@ -7,10 +7,16 @@ use std::sync::Mutex;
 use tauri::Manager;
 use tauri_plugin_updater::{Update, UpdaterExt};
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 const DEFAULT_UPDATE_ENDPOINT: &str = "https://github.com/hw7622/nanobot-desktop/releases/latest/download/latest.json";
 const DEFAULT_UPDATE_CHANNEL: &str = "stable";
 const UPDATE_ENDPOINT_OVERRIDE: Option<&str> = option_env!("NANOBOT_DESKTOP_UPDATER_ENDPOINT");
 const UPDATE_PUBKEY: Option<&str> = option_env!("NANOBOT_DESKTOP_UPDATER_PUBKEY");
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 struct BackendChild(Mutex<Option<Child>>);
 struct PendingUpdate(Mutex<Option<Update>>);
@@ -99,10 +105,7 @@ async fn install_update(
     };
 
     update
-        .download_and_install(
-            |_chunk_length, _content_length| {},
-            || {},
-        )
+        .download_and_install(|_chunk_length, _content_length| {}, || {})
         .await
         .map_err(|err| err.to_string())?;
 
@@ -126,6 +129,8 @@ fn main() {
 
             let mut command = Command::new(&backend_exe);
             command.stdout(Stdio::null()).stderr(Stdio::null());
+            #[cfg(windows)]
+            command.creation_flags(CREATE_NO_WINDOW);
             if let Some(dir) = app_data_dir {
                 let _ = std::fs::create_dir_all(&dir);
                 command.env("NANOBOT_DESKTOP_DATA_DIR", dir);
@@ -259,5 +264,3 @@ fn updater_settings() -> UpdaterSettings {
         channel: DEFAULT_UPDATE_CHANNEL.to_string(),
     }
 }
-
-

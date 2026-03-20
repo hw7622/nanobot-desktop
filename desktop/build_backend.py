@@ -16,6 +16,7 @@ command = [
     "--name",
     "nanobot-desktop-backend",
     "--onedir",
+    "--noconsole",
     "--clean",
     "--noconfirm",
     "--distpath",
@@ -45,3 +46,4 @@ command = [
 ]
 
 raise SystemExit(subprocess.call(command, cwd=ROOT))
+
