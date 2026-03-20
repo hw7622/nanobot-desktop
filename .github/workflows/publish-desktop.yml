@@ -54,7 +54,7 @@ jobs:
           python desktop/build_runtime.py
 
       - name: Publish Windows desktop release
-        uses: tauri-apps/tauri-action@v0.6.0
+        uses: tauri-apps/tauri-action@v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ env.TAURI_SIGNING_PRIVATE_KEY }}
@@ -62,14 +62,11 @@ jobs:
           NANOBOT_DESKTOP_UPDATER_ENDPOINT: ${{ env.NANOBOT_DESKTOP_UPDATER_ENDPOINT }}
           NANOBOT_DESKTOP_UPDATER_PUBKEY: ${{ env.NANOBOT_DESKTOP_UPDATER_PUBKEY }}
         with:
-          projectPath: desktop
-          tauriScript: cargo tauri
+          projectPath: desktop/src-tauri
           tagName: desktop-v__VERSION__
           releaseName: Nanobot Desktop v__VERSION__
           releaseBody: Windows desktop build for Nanobot. The updater feed is published as latest.json.
           releaseDraft: true
           prerelease: false
-          includeUpdaterJson: true
+          uploadUpdaterJson: true
           updaterJsonPreferNsis: true
-
-
