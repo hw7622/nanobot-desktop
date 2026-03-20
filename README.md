@@ -1,6 +1,7 @@
 <div align="center">
   <img src="nanobot_logo.png" alt="nanobot" width="500">
-  <h1>nanobot: Ultra-Lightweight Personal AI Assistant</h1>
+  <h1>nanobot / Nanobot Desktop</h1>
+  <p>中文优先的桌面增强版个人 AI 助手 · Chinese-first desktop-enhanced personal AI assistant</p>
   <p>
     <a href="https://pypi.org/project/nanobot-ai/"><img src="https://img.shields.io/pypi/v/nanobot-ai" alt="PyPI"></a>
     <a href="https://pepy.tech/project/nanobot-ai"><img src="https://static.pepy.tech/badge/nanobot-ai" alt="Downloads"></a>
@@ -11,6 +12,68 @@
     <a href="https://discord.gg/MnCvHqpUGB"><img src="https://img.shields.io/badge/Discord-Community-5865F2?style=flat&logo=discord&logoColor=white" alt="Discord"></a>
   </p>
 </div>
+
+## 中文说明
+
+这个仓库当前更偏向 `nanobot-desktop` 的使用方式：在保留 `nanobot` 轻量核心的基础上，提供 Windows 桌面壳、安装包、自动更新和适合小白的可视化配置界面。
+
+核心目标：
+
+- 安装后直接打开 UI 配置 AI、MCP、Skills 和聊天渠道
+- 保留多渠道能力：Telegram、飞书、钉钉、Email、QQ、企业微信
+- 用桌面端查看真实会话，不再只看日志
+- 支持安装版发布与自动更新
+
+适合的使用方式：
+
+1. 在桌面 UI 里填入 AI 地址、API Key、模型名
+2. 保存并重启 Gateway
+3. 配置 Telegram / 飞书等渠道
+4. 在聊天窗口先做本地测试，再到真实渠道中发消息控制电脑工作
+
+### 桌面版快速开始
+
+```bash
+git clone https://github.com/hw7622/nanobot-desktop.git
+cd nanobot-desktop
+pip install -e .
+cd desktop
+npm install
+python build_runtime.py
+cd src-tauri
+cargo tauri dev
+```
+
+如果要打正式安装包：
+
+```bash
+cd desktop
+python build_runtime.py
+cd src-tauri
+cargo tauri build
+```
+
+常用说明：
+
+- Windows 安装版会把运行时一并打进去，普通用户不需要再单独安装 Python / Cargo / Rust
+- 开发阶段建议优先本地调试，不要每次都推 GitHub Actions 编译
+- 自动更新基于你自己的 fork Release，不直接跟随上游主仓库
+- 更详细的中文补充可以看 [README.zh-CN.md](./README.zh-CN.md)
+
+## English Summary
+
+This fork focuses on a desktop-first Nanobot experience for non-technical users:
+
+- a Windows desktop shell and installer
+- updater-ready release workflow
+- visual configuration for AI / MCP / Skills / channels
+- real session viewer for Telegram, Feishu, DingTalk, Email, QQ and WeCom
+
+For day-to-day usage, configure the model in the desktop UI first, save and restart the gateway, then test in the built-in chat view before moving to real channels.
+
+## 上游详细文档 / Upstream Details
+
+下面保留的是上游风格的详细功能说明，方便继续查阅完整能力、配置项和项目背景。
 
 🐈 **nanobot** is an **ultra-lightweight** personal AI assistant inspired by [OpenClaw](https://github.com/openclaw/openclaw).
 
