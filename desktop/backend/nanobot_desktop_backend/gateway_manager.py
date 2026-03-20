@@ -13,6 +13,10 @@ from typing import Any
 from nanobot_desktop_backend.paths import get_config_path, get_logs_dir
 
 
+MAX_LOG_BYTES = 1_000_000
+MAX_LOG_ARCHIVES = 5
+
+
 class GatewayManager:
     """Manages the nanobot gateway child process."""
 
@@ -33,14 +37,12 @@ class GatewayManager:
                 return self._status_unlocked()
 
             self._gateway_log.parent.mkdir(parents=True, exist_ok=True)
+            self._rotate_logs_unlocked()
             self._log_handle = open(self._gateway_log, "a", encoding="utf-8")
             command = self._resolve_gateway_command()
             creationflags = 0
             if sys.platform == "win32":
-                creationflags = (
-                    getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-                )
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 
             repo_root = Path(__file__).resolve().parents[3]
             self._process = subprocess.Popen(
@@ -99,12 +101,11 @@ class GatewayManager:
             "pid": pid,
             "logPath": str(self._gateway_log),
             "lastExitCode": self._last_exit_code,
+            "logRotation": {"maxBytes": MAX_LOG_BYTES, "maxArchives": MAX_LOG_ARCHIVES},
         }
 
     def _is_running(self) -> bool:
-        if self._process is None:
-            return False
-        return self._process.poll() is None
+        return self._process is not None and self._process.poll() is None
 
     def _close_log_unlocked(self) -> None:
         if self._log_handle is not None:
@@ -113,6 +114,25 @@ class GatewayManager:
             except Exception:
                 pass
             self._log_handle = None
+
+    def _rotate_logs_unlocked(self) -> None:
+        if not self._gateway_log.exists():
+            return
+        try:
+            if self._gateway_log.stat().st_size < MAX_LOG_BYTES:
+                return
+        except OSError:
+            return
+
+        for index in range(MAX_LOG_ARCHIVES, 0, -1):
+            source = self._gateway_log.parent / f"gateway.{index}.log"
+            target = self._gateway_log.parent / f"gateway.{index + 1}.log"
+            if source.exists():
+                if index >= MAX_LOG_ARCHIVES:
+                    source.unlink(missing_ok=True)
+                else:
+                    source.replace(target)
+        self._gateway_log.replace(self._gateway_log.parent / "gateway.1.log")
 
     def _resolve_gateway_command(self) -> list[str]:
         override = os.environ.get("NANOBOT_DESKTOP_GATEWAY_BIN")

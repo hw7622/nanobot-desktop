@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -10,6 +11,9 @@ from typing import Any
 
 from nanobot_desktop_backend.paths import ensure_dirs, get_config_path, get_workspace_dir
 from nanobot_desktop_backend.schemas import default_config_payload
+
+
+SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 def _repo_root() -> Path:
@@ -83,6 +87,14 @@ def save_runtime_config(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def get_workspace_skills_dir() -> Path:
+    cfg = load_runtime_config()
+    workspace = Path(cfg["agents"]["defaults"]["workspace"]).expanduser()
+    skills_dir = workspace / "skills"
+    skills_dir.mkdir(parents=True, exist_ok=True)
+    return skills_dir
+
+
 def get_skill_inventory() -> dict[str, Any]:
     cfg = load_runtime_config()
     workspace = Path(cfg["agents"]["defaults"]["workspace"]).expanduser()
@@ -108,6 +120,7 @@ def get_skill_inventory() -> dict[str, Any]:
                     "available": True,
                     "always": metadata.get("always") in (True, "true"),
                     "metadata": metadata,
+                    "editable": source_name == "workspace",
                 }
             )
 
@@ -116,6 +129,35 @@ def get_skill_inventory() -> dict[str, Any]:
         "skillsDirectory": str(workspace_root),
         "items": items,
     }
+
+
+def create_workspace_skill(name: str) -> dict[str, Any]:
+    skill_name = normalize_skill_name(name)
+    skill_dir = get_workspace_skills_dir() / skill_name
+    if skill_dir.exists():
+        raise ValueError(f"Skill '{skill_name}' 已存在")
+    skill_dir.mkdir(parents=True, exist_ok=False)
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text(
+        f"---\nname: {skill_name}\ndescription: TODO\nalways: false\n---\n\n# {skill_name}\n\n在这里描述这个 skill 的用途、触发条件和执行规则。\n",
+        encoding="utf-8",
+    )
+    return {"name": skill_name, "path": str(skill_file)}
+
+
+def delete_workspace_skill(name: str) -> None:
+    skill_name = normalize_skill_name(name)
+    skill_dir = get_workspace_skills_dir() / skill_name
+    if not skill_dir.exists():
+        raise ValueError(f"Skill '{skill_name}' 不存在")
+    shutil.rmtree(skill_dir)
+
+
+def normalize_skill_name(value: str) -> str:
+    skill_name = (value or "").strip()
+    if not SKILL_NAME_RE.fullmatch(skill_name):
+        raise ValueError("Skill 名称只支持字母、数字、点、下划线和短横线，且必须以字母或数字开头")
+    return skill_name
 
 
 def parse_skill_metadata(path: Path) -> dict[str, Any]:
