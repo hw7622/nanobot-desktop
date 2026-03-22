@@ -1,4 +1,4 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 use serde::Serialize;
 use std::path::PathBuf;
@@ -14,6 +14,10 @@ const DEFAULT_UPDATE_ENDPOINT: &str = "https://github.com/hw7622/nanobot-desktop
 const DEFAULT_UPDATE_CHANNEL: &str = "stable";
 const UPDATE_ENDPOINT_OVERRIDE: Option<&str> = option_env!("NANOBOT_DESKTOP_UPDATER_ENDPOINT");
 const UPDATE_PUBKEY: Option<&str> = option_env!("NANOBOT_DESKTOP_UPDATER_PUBKEY");
+#[cfg(windows)]
+const AUTO_LAUNCH_REG_PATH: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+#[cfg(windows)]
+const AUTO_LAUNCH_REG_NAME: &str = "Nanobot Desktop";
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -41,6 +45,14 @@ struct UpdatePayload {
     current_version: String,
     date: Option<String>,
     body: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AutoLaunchPayload {
+    supported: bool,
+    enabled: bool,
+    note: String,
 }
 
 #[tauri::command]
@@ -112,6 +124,17 @@ async fn install_update(
     Ok(build_update_status(&app, None))
 }
 
+#[tauri::command]
+async fn autostart_status() -> Result<AutoLaunchPayload, String> {
+    Ok(read_auto_launch_state())
+}
+
+#[tauri::command]
+async fn set_autostart(enabled: bool) -> Result<AutoLaunchPayload, String> {
+    write_auto_launch_state(enabled)?;
+    Ok(read_auto_launch_state())
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(BackendChild(Mutex::new(None)))
@@ -119,6 +142,10 @@ fn main() {
         .setup(|app| {
             #[cfg(desktop)]
             app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
+
+            if cfg!(debug_assertions) {
+                return Ok(());
+            }
 
             let resource_roots = candidate_resource_roots(app);
             let Some(backend_exe) = find_packaged_exe(&resource_roots, "backend", "nanobot-desktop-backend") else {
@@ -146,7 +173,13 @@ fn main() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![updater_status, check_for_updates, install_update])
+        .invoke_handler(tauri::generate_handler![
+            updater_status,
+            check_for_updates,
+            install_update,
+            autostart_status,
+            set_autostart
+        ])
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 let state = window.state::<BackendChild>();
@@ -247,6 +280,102 @@ fn exe_name(base: &str) -> String {
     } else {
         base.to_string()
     }
+}
+
+#[cfg(windows)]
+fn quoted_current_exe() -> Result<String, String> {
+    let exe = std::env::current_exe().map_err(|err| err.to_string())?;
+    Ok(format!("\"{}\"", exe.display()))
+}
+
+#[cfg(windows)]
+fn run_reg_command(args: &[&str]) -> Result<std::process::Output, String> {
+    let mut command = Command::new("reg");
+    command.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command.creation_flags(CREATE_NO_WINDOW);
+    command.output().map_err(|err| err.to_string())
+}
+
+#[cfg(windows)]
+fn read_auto_launch_state() -> AutoLaunchPayload {
+    let expected = quoted_current_exe().ok();
+    match run_reg_command(&["query", AUTO_LAUNCH_REG_PATH, "/v", AUTO_LAUNCH_REG_NAME]) {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let enabled = expected
+                .as_ref()
+                .map(|value| stdout.contains(value))
+                .unwrap_or(true);
+            AutoLaunchPayload {
+                supported: true,
+                enabled,
+                note: if enabled {
+                    "开机后会自动启动桌面程序。".to_string()
+                } else {
+                    "当前未启用开机自启动。".to_string()
+                },
+            }
+        }
+        _ => AutoLaunchPayload {
+            supported: true,
+            enabled: false,
+            note: "当前未启用开机自启动。".to_string(),
+        },
+    }
+}
+
+#[cfg(not(windows))]
+fn read_auto_launch_state() -> AutoLaunchPayload {
+    AutoLaunchPayload {
+        supported: false,
+        enabled: false,
+        note: "当前平台暂未接入开机自启动。".to_string(),
+    }
+}
+
+#[cfg(windows)]
+fn write_auto_launch_state(enabled: bool) -> Result<(), String> {
+    if enabled {
+        let value = quoted_current_exe()?;
+        let output = run_reg_command(&[
+            "add",
+            AUTO_LAUNCH_REG_PATH,
+            "/v",
+            AUTO_LAUNCH_REG_NAME,
+            "/t",
+            "REG_SZ",
+            "/d",
+            value.as_str(),
+            "/f",
+        ])?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(stderr.trim().to_string());
+    }
+
+    let output = run_reg_command(&[
+        "delete",
+        AUTO_LAUNCH_REG_PATH,
+        "/v",
+        AUTO_LAUNCH_REG_NAME,
+        "/f",
+    ])?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("Unable to find") || stderr.contains("找不到") {
+        return Ok(());
+    }
+    Err(stderr.trim().to_string())
+}
+
+#[cfg(not(windows))]
+fn write_auto_launch_state(_enabled: bool) -> Result<(), String> {
+    Err("当前平台暂不支持开机自启动设置。".to_string())
 }
 
 struct UpdaterSettings {

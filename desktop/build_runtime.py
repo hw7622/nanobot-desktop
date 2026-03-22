@@ -34,6 +34,7 @@ command = [
     "--name",
     "nanobot-runtime",
     "--onedir",
+    "--noconsole",
     "--clean",
     "--noconfirm",
     "--distpath",

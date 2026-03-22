@@ -9,11 +9,25 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from nanobot_desktop_backend.paths import ensure_dirs, get_config_path, get_workspace_dir
+from nanobot.config.schema import Config
+from nanobot.providers.registry import find_by_name
+
+from nanobot_desktop_backend.paths import ensure_dirs, get_config_path, get_data_dir, get_workspace_dir
 from nanobot_desktop_backend.schemas import default_config_payload
 
 
 SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _merge_desktop_defaults(payload: dict[str, Any]) -> dict[str, Any]:
+    desktop = payload.setdefault("desktop", {})
+    gateway = desktop.setdefault("gateway", {})
+    gateway.setdefault("autoStart", True)
+    app = desktop.setdefault("app", {})
+    app.setdefault("autoLaunch", False)
+    chat = desktop.setdefault("chat", {})
+    chat.setdefault("refreshIntervalSeconds", 3)
+    return payload
 
 
 def _repo_root() -> Path:
@@ -71,16 +85,71 @@ def load_runtime_config() -> dict[str, Any]:
     config_path = get_config_path()
     if not config_path.exists():
         return ensure_default_config()
-    return json.loads(config_path.read_text(encoding="utf-8"))
+    return _merge_desktop_defaults(json.loads(config_path.read_text(encoding="utf-8")))
 
 
 def dump_runtime_config() -> dict[str, Any]:
     return load_runtime_config()
 
 
+def load_core_runtime_config() -> dict[str, Any]:
+    payload = load_runtime_config()
+    return {key: value for key, value in payload.items() if key != "desktop"}
+
+
+def gateway_start_preflight() -> dict[str, Any]:
+    payload = load_core_runtime_config()
+    config = Config.model_validate(payload)
+    model = config.agents.defaults.model
+    provider_name = config.get_provider_name(model) or config.agents.defaults.provider or "auto"
+    provider = config.get_provider(model)
+    spec = find_by_name(provider_name) if provider_name else None
+
+    if provider_name == "custom":
+        if not provider or not (provider.api_key or "").strip() or not (provider.api_base or "").strip():
+            return {
+                "ok": False,
+                "code": "missing_custom_provider_config",
+                "message": "未配置可用 AI：Custom 需要同时填写 API Base 和 API Key。",
+                "provider": provider_name,
+                "model": model,
+            }
+        return {"ok": True, "provider": provider_name, "model": model}
+
+    if provider_name == "azure_openai":
+        if not provider or not (provider.api_key or "").strip() or not (provider.api_base or "").strip():
+            return {
+                "ok": False,
+                "code": "missing_azure_openai_config",
+                "message": "未配置可用 AI：Azure OpenAI 需要同时填写 API Base 和 API Key。",
+                "provider": provider_name,
+                "model": model,
+            }
+        return {"ok": True, "provider": provider_name, "model": model}
+
+    if spec and (spec.is_local or spec.is_oauth):
+        return {"ok": True, "provider": provider_name, "model": model}
+
+    if provider and (provider.api_key or "").strip():
+        return {"ok": True, "provider": provider_name, "model": model}
+
+    if provider_name and provider_name != "auto":
+        message = f"未配置可用 AI：当前 {provider_name} 缺少 API Key。请先在 AI 配置里填写后再启动 Gateway。"
+    else:
+        message = "未配置可用 AI：请先在 AI 配置里填写模型和 API Key。"
+    return {
+        "ok": False,
+        "code": "missing_provider_api_key",
+        "message": message,
+        "provider": provider_name,
+        "model": model,
+    }
+
+
 def save_runtime_config(payload: dict[str, Any]) -> dict[str, Any]:
     config_path = get_config_path()
     config_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = _merge_desktop_defaults(payload)
     workspace = payload.setdefault("agents", {}).setdefault("defaults", {}).setdefault("workspace", str(get_workspace_dir()))
     config_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     _sync_workspace_templates(Path(workspace).expanduser())
@@ -100,9 +169,20 @@ def get_skill_inventory() -> dict[str, Any]:
     workspace = Path(cfg["agents"]["defaults"]["workspace"]).expanduser()
     builtin_root = _skills_dir()
     workspace_root = workspace / "skills"
+    legacy_roots = [
+        get_data_dir() / "workspace" / "skills",
+        _repo_root() / ".desktop-data" / "workspace" / "skills",
+        Path.home() / ".nanobot" / "workspace" / "skills",
+    ]
     items: list[dict[str, Any]] = []
+    seen_files: set[str] = set()
 
-    for source_root, source_name in ((builtin_root, "builtin"), (workspace_root, "workspace")):
+    roots: list[tuple[Path, str]] = [(builtin_root, "builtin"), (workspace_root, "workspace")]
+    for legacy_root in legacy_roots:
+        if legacy_root not in (builtin_root, workspace_root):
+            roots.append((legacy_root, "workspace"))
+
+    for source_root, source_name in roots:
         if not source_root.exists():
             continue
         for skill_dir in sorted(source_root.iterdir()):
@@ -111,6 +191,10 @@ def get_skill_inventory() -> dict[str, Any]:
             skill_file = skill_dir / "SKILL.md"
             if not skill_file.exists():
                 continue
+            skill_key = str(skill_file.resolve())
+            if skill_key in seen_files:
+                continue
+            seen_files.add(skill_key)
             metadata = parse_skill_metadata(skill_file)
             items.append(
                 {

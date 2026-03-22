@@ -7,9 +7,11 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from nanobot_desktop_backend.config_manager import gateway_start_preflight
 from nanobot_desktop_backend.paths import get_config_path, get_logs_dir
 
 
@@ -26,6 +28,8 @@ class GatewayManager:
         self._gateway_log = get_logs_dir() / "gateway.log"
         self._last_exit_code: int | None = None
         self._log_handle = None
+        self._status_note = ""
+        self._status_code = ""
 
     @property
     def log_path(self) -> Path:
@@ -36,10 +40,20 @@ class GatewayManager:
             if self._is_running():
                 return self._status_unlocked()
 
+            preflight = gateway_start_preflight()
+            if not preflight.get("ok"):
+                self._last_exit_code = None
+                self._status_code = str(preflight.get("code") or "")
+                self._status_note = str(preflight.get("message") or "")
+                self._write_note_unlocked(self._status_note)
+                return self._status_unlocked()
+
             self._gateway_log.parent.mkdir(parents=True, exist_ok=True)
             self._rotate_logs_unlocked()
             self._log_handle = open(self._gateway_log, "a", encoding="utf-8")
             command = self._resolve_gateway_command()
+            self._status_note = ""
+            self._status_code = ""
             creationflags = 0
             if sys.platform == "win32":
                 creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -79,6 +93,8 @@ class GatewayManager:
             self._last_exit_code = self._process.returncode
             self._process = None
             self._close_log_unlocked()
+            self._status_note = ""
+            self._status_code = ""
             return self._status_unlocked()
 
     def restart(self) -> dict[str, Any]:
@@ -101,6 +117,8 @@ class GatewayManager:
             "pid": pid,
             "logPath": str(self._gateway_log),
             "lastExitCode": self._last_exit_code,
+            "statusCode": self._status_code,
+            "note": self._status_note,
             "logRotation": {"maxBytes": MAX_LOG_BYTES, "maxArchives": MAX_LOG_ARCHIVES},
         }
 
@@ -133,6 +151,11 @@ class GatewayManager:
                 else:
                     source.replace(target)
         self._gateway_log.replace(self._gateway_log.parent / "gateway.1.log")
+
+    def _write_note_unlocked(self, note: str) -> None:
+        self._gateway_log.parent.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._gateway_log.write_text(f"{timestamp} {note}\n", encoding="utf-8")
 
     def _resolve_gateway_command(self) -> list[str]:
         override = os.environ.get("NANOBOT_DESKTOP_GATEWAY_BIN")

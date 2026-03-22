@@ -10,21 +10,22 @@ PROVIDERS = {
     "anthropic": "Anthropic",
     "openai": "OpenAI",
     "deepseek": "DeepSeek",
-    "dashscope": "DashScope / Qwen",
+    "dashscope": "通义千问",
     "gemini": "Gemini",
-    "moonshot": "Moonshot / Kimi",
-    "zhipu": "Zhipu GLM",
+    "moonshot": "Kimi",
+    "zhipu": "智谱 GLM",
     "ollama": "Ollama",
-    "custom": "Custom Compatible API",
+    "custom": "自定义兼容接口",
 }
 
 CHANNELS = {
     "telegram": "Telegram",
-    "feishu": "Feishu",
-    "dingtalk": "DingTalk",
+    "weixin": "微信",
+    "feishu": "飞书",
+    "dingtalk": "钉钉",
     "email": "Email",
     "qq": "QQ",
-    "wecom": "WeCom",
+    "wecom": "企业微信",
 }
 
 CHANNEL_DEFAULTS = {
@@ -35,6 +36,14 @@ CHANNEL_DEFAULTS = {
         "proxy": None,
         "replyToMessage": False,
         "groupPolicy": "mention",
+    },
+    "weixin": {
+        "enabled": False,
+        "apiPort": 31966,
+        "baseUrl": "https://ilinkai.weixin.qq.com",
+        "pluginDir": "",
+        "autoStartApi": False,
+        "autoStartBridge": False,
     },
     "feishu": {
         "enabled": False,
@@ -94,10 +103,26 @@ CHANNEL_FIELD_META = {
     "telegram": [
         {"key": "enabled", "label": "启用 Telegram", "type": "toggle"},
         {"key": "token", "label": "Bot Token", "type": "password", "required": True},
-        {"key": "allowFrom", "label": "允许访问用户", "type": "list", "placeholder": "用户 ID 或用户名"},
+        {"key": "allowFrom", "label": "允许访问的用户", "type": "list", "placeholder": "用户 ID 或用户名"},
         {"key": "proxy", "label": "代理", "type": "text", "placeholder": "http://127.0.0.1:7890"},
         {"key": "replyToMessage", "label": "回复原消息", "type": "toggle"},
-        {"key": "groupPolicy", "label": "群聊策略", "type": "select", "options": [{"label": "仅 @ 机器人", "value": "mention"}, {"label": "直接收群消息", "value": "open"}]},
+        {
+            "key": "groupPolicy",
+            "label": "群聊策略",
+            "type": "select",
+            "options": [
+                {"label": "仅响应 @ 机器人", "value": "mention"},
+                {"label": "直接接收群消息", "value": "open"},
+            ],
+        },
+    ],
+    "weixin": [
+        {"key": "enabled", "label": "启用微信插件", "type": "toggle"},
+        {"key": "apiPort", "label": "本地接口端口", "type": "number"},
+        {"key": "baseUrl", "label": "微信服务地址", "type": "text"},
+        {"key": "pluginDir", "label": "插件目录", "type": "text", "placeholder": "留空则自动使用默认目录"},
+        {"key": "autoStartApi", "label": "打开桌面时自动启动微信接口", "type": "toggle"},
+        {"key": "autoStartBridge", "label": "登录后自动启动桥接", "type": "toggle"},
     ],
     "feishu": [
         {"key": "enabled", "label": "启用飞书", "type": "toggle"},
@@ -105,18 +130,18 @@ CHANNEL_FIELD_META = {
         {"key": "appSecret", "label": "App Secret", "type": "password", "required": True},
         {"key": "encryptKey", "label": "Encrypt Key", "type": "password"},
         {"key": "verificationToken", "label": "Verification Token", "type": "password"},
-        {"key": "allowFrom", "label": "允许访问用户", "type": "list"},
+        {"key": "allowFrom", "label": "允许访问的用户", "type": "list"},
     ],
     "dingtalk": [
         {"key": "enabled", "label": "启用钉钉", "type": "toggle"},
         {"key": "clientId", "label": "Client ID / App Key", "type": "text", "required": True},
         {"key": "clientSecret", "label": "Client Secret", "type": "password", "required": True},
         {"key": "robotCode", "label": "Robot Code", "type": "text"},
-        {"key": "allowFrom", "label": "允许访问用户", "type": "list"},
+        {"key": "allowFrom", "label": "允许访问的用户", "type": "list"},
     ],
     "email": [
         {"key": "enabled", "label": "启用 Email", "type": "toggle"},
-        {"key": "consentGranted", "label": "已取得收件授权", "type": "toggle"},
+        {"key": "consentGranted", "label": "已获得收件授权", "type": "toggle"},
         {"key": "imapHost", "label": "IMAP Host", "type": "text"},
         {"key": "imapPort", "label": "IMAP Port", "type": "number"},
         {"key": "imapUsername", "label": "IMAP 用户名", "type": "text"},
@@ -126,20 +151,28 @@ CHANNEL_FIELD_META = {
         {"key": "smtpUsername", "label": "SMTP 用户名", "type": "text"},
         {"key": "smtpPassword", "label": "SMTP 密码", "type": "password"},
         {"key": "fromAddress", "label": "发件地址", "type": "text"},
-        {"key": "allowFrom", "label": "允许访问邮箱", "type": "list"},
+        {"key": "allowFrom", "label": "允许访问的邮箱", "type": "list"},
     ],
     "qq": [
         {"key": "enabled", "label": "启用 QQ", "type": "toggle"},
         {"key": "appId", "label": "App ID", "type": "text", "required": True},
         {"key": "secret", "label": "Secret", "type": "password", "required": True},
-        {"key": "allowFrom", "label": "允许访问用户", "type": "list"},
-        {"key": "msgFormat", "label": "消息格式", "type": "select", "options": [{"label": "纯文本", "value": "plain"}, {"label": "Markdown", "value": "markdown"}]},
+        {"key": "allowFrom", "label": "允许访问的用户", "type": "list"},
+        {
+            "key": "msgFormat",
+            "label": "消息格式",
+            "type": "select",
+            "options": [
+                {"label": "纯文本", "value": "plain"},
+                {"label": "Markdown", "value": "markdown"},
+            ],
+        },
     ],
     "wecom": [
         {"key": "enabled", "label": "启用企业微信", "type": "toggle"},
         {"key": "botId", "label": "Bot ID", "type": "text", "required": True},
         {"key": "secret", "label": "Secret", "type": "password", "required": True},
-        {"key": "allowFrom", "label": "允许访问用户", "type": "list"},
+        {"key": "allowFrom", "label": "允许访问的用户", "type": "list"},
         {"key": "welcomeMessage", "label": "欢迎语", "type": "textarea"},
     ],
 }
@@ -149,29 +182,60 @@ PROVIDER_FIELD_META = {
     "anthropic": [{"key": "apiKey", "label": "API Key", "type": "password", "required": True}],
     "openai": [{"key": "apiKey", "label": "API Key", "type": "password", "required": True}],
     "deepseek": [{"key": "apiKey", "label": "API Key", "type": "password", "required": True}],
-    "dashscope": [{"key": "apiKey", "label": "API Key", "type": "password", "required": True}, {"key": "apiBase", "label": "API Base", "type": "text"}],
+    "dashscope": [
+        {"key": "apiKey", "label": "API Key", "type": "password", "required": True},
+        {"key": "apiBase", "label": "API Base", "type": "text"},
+    ],
     "gemini": [{"key": "apiKey", "label": "API Key", "type": "password", "required": True}],
     "moonshot": [{"key": "apiKey", "label": "API Key", "type": "password", "required": True}],
-    "zhipu": [{"key": "apiKey", "label": "API Key", "type": "password", "required": True}, {"key": "apiBase", "label": "API Base", "type": "text"}],
+    "zhipu": [
+        {"key": "apiKey", "label": "API Key", "type": "password", "required": True},
+        {"key": "apiBase", "label": "API Base", "type": "text"},
+    ],
     "ollama": [{"key": "apiBase", "label": "API Base", "type": "text", "required": True, "placeholder": "http://localhost:11434"}],
-    "custom": [{"key": "apiKey", "label": "API Key", "type": "password", "required": True}, {"key": "apiBase", "label": "API Base", "type": "text", "required": True}, {"key": "extraHeaders", "label": "额外请求头", "type": "json"}],
+    "custom": [
+        {"key": "apiKey", "label": "API Key", "type": "password", "required": True},
+        {"key": "apiBase", "label": "API Base", "type": "text", "required": True},
+        {"key": "extraHeaders", "label": "额外请求头", "type": "json"},
+    ],
 }
 
 AGENT_FIELDS = [
-    {"key": "provider", "label": "默认 Provider", "type": "select-provider"},
+    {"key": "provider", "label": "默认供应商", "type": "select-provider"},
     {"key": "model", "label": "默认模型", "type": "text", "required": True},
     {"key": "workspace", "label": "工作区", "type": "text"},
     {"key": "maxTokens", "label": "Max Tokens", "type": "number"},
     {"key": "contextWindowTokens", "label": "上下文窗口", "type": "number"},
     {"key": "temperature", "label": "Temperature", "type": "number", "step": 0.1},
     {"key": "maxToolIterations", "label": "工具迭代上限", "type": "number"},
-    {"key": "reasoningEffort", "label": "推理强度", "type": "select", "options": [{"label": "自动 / 关闭", "value": ""}, {"label": "low", "value": "low"}, {"label": "medium", "value": "medium"}, {"label": "high", "value": "high"}]},
+    {
+        "key": "reasoningEffort",
+        "label": "推理强度",
+        "type": "select",
+        "options": [
+            {"label": "自动", "value": ""},
+            {"label": "low", "value": "low"},
+            {"label": "medium", "value": "medium"},
+            {"label": "high", "value": "high"},
+        ],
+    },
 ]
 
 TOOLS_FIELDS = {
     "web": [
         {"key": "proxy", "label": "Web 代理", "type": "text", "placeholder": "http://127.0.0.1:7890"},
-        {"key": "search.provider", "label": "搜索 Provider", "type": "select", "options": [{"label": "Brave", "value": "brave"}, {"label": "Tavily", "value": "tavily"}, {"label": "DuckDuckGo", "value": "duckduckgo"}, {"label": "SearXNG", "value": "searxng"}, {"label": "Jina", "value": "jina"}]},
+        {
+            "key": "search.provider",
+            "label": "搜索 Provider",
+            "type": "select",
+            "options": [
+                {"label": "Brave", "value": "brave"},
+                {"label": "Tavily", "value": "tavily"},
+                {"label": "DuckDuckGo", "value": "duckduckgo"},
+                {"label": "SearXNG", "value": "searxng"},
+                {"label": "Jina", "value": "jina"},
+            ],
+        },
         {"key": "search.apiKey", "label": "搜索 API Key", "type": "password"},
         {"key": "search.baseUrl", "label": "搜索 Base URL", "type": "text"},
         {"key": "search.maxResults", "label": "最大结果数", "type": "number"},
@@ -227,6 +291,11 @@ def default_config_payload(workspace: str) -> dict[str, Any]:
             "exec": {"timeout": 60, "pathAppend": ""},
             "restrictToWorkspace": False,
             "mcpServers": {},
+        },
+        "desktop": {
+            "gateway": {"autoStart": True},
+            "app": {"autoLaunch": False},
+            "chat": {"refreshIntervalSeconds": 3},
         },
     }
 

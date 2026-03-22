@@ -14,7 +14,7 @@ from nanobot.cli.commands import _make_provider
 from nanobot.config.schema import Config
 from nanobot.session.manager import SessionManager
 
-from nanobot_desktop_backend.config_manager import load_runtime_config
+from nanobot_desktop_backend.config_manager import load_core_runtime_config
 
 
 class ChatManager:
@@ -67,14 +67,14 @@ class ChatManager:
         return [self._serialize_message(message) for message in session.messages]
 
     def _ensure_sessions_unlocked(self) -> None:
-        payload = load_runtime_config()
+        payload = load_core_runtime_config()
         workspace = Config.model_validate(payload).workspace_path
         if self._sessions is None or self._workspace != workspace:
             self._sessions = SessionManager(workspace)
             self._workspace = workspace
 
     def _ensure_agent_unlocked(self) -> None:
-        payload = load_runtime_config()
+        payload = load_core_runtime_config()
         signature = json.dumps(payload, sort_keys=True, ensure_ascii=False)
         self._ensure_sessions_unlocked()
         if self._agent is not None and self._signature == signature:

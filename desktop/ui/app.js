@@ -1,39 +1,10 @@
-
-const tabs = [
-  ["overview", "概览", "状态、入口和快捷动作"],
-  ["chat", "聊天窗口", "查看真实会话和本地测试聊天"],
-  ["ai", "AI 配置", "只保留小白最常改的核心项"],
-  ["channels", "渠道配置", "Telegram / 飞书 / 钉钉等"],
-  ["mcp", "MCP", "Server、超时与工具白名单"],
-  ["skills", "Skills", "内置与工作区技能管理"],
-  ["runtime", "运行控制", "Gateway、日志和诊断"],
+﻿const tabs = [
+  { id: "dashboard", short: "DB", label: "仪表盘", hint: "核心状态、控制与启动行为" },
+  { id: "ai", short: "AI", label: "AI 配置", hint: "Provider、模型与高级参数" },
+  { id: "channels", short: "CN", label: "渠道配置", hint: "Telegram、飞书等入口开关" },
+  { id: "skills", short: "SK", label: "Skills", hint: "技能卡片与工作区目录" },
+  { id: "logs", short: "LG", label: "实时日志", hint: "全屏查看 Gateway 日志" },
 ];
-
-const state = {
-  tab: "overview",
-  bootstrap: null,
-  draft: null,
-  provider: "openrouter",
-  logs: [],
-  updater: fallbackUpdaterState("正在读取更新状态..."),
-  updaterBusy: "",
-  bootstrapError: "",
-  saveBusy: false,
-  saveRestartBusy: false,
-  restartRecommended: false,
-  lastSaveMessage: "",
-  sessions: [],
-  selectedSessionKey: "desktop:console",
-  selectedSession: null,
-  selectedSessionItems: [],
-  selectedSessionBusy: false,
-  chatBusy: false,
-  chatDraft: "",
-  logScrollTop: 0,
-  logStickBottom: true,
-  chatScrollTop: 0,
-  chatStickBottom: true,
-};
 
 const API_BASE = (() => {
   if (typeof window !== "undefined" && typeof window.__NANOBOT_API_BASE__ === "string") return window.__NANOBOT_API_BASE__;
@@ -42,7 +13,50 @@ const API_BASE = (() => {
 })();
 
 const TAURI_INVOKE = window.__TAURI__?.core?.invoke;
+
+const state = {
+  tab: "dashboard",
+  isMainNavVisible: true,
+  channelExpanded: {},
+  bootstrap: null,
+  draft: null,
+  bootstrapError: "",
+  provider: "openrouter",
+  logs: [],
+  sessions: [],
+  selectedSessionKey: "desktop:console",
+  selectedSession: null,
+  selectedSessionItems: [],
+  chatDraft: "",
+  chatBusy: false,
+  gatewayBusy: "",
+  saveBusy: false,
+  saveRestartBusy: false,
+  lastSaveMessage: "",
+  restartRecommended: false,
+  updaterBusy: "",
+  updater: fallbackUpdaterState("等待更新状态"),
+  autoLaunchSupported: false,
+  autoLaunchEnabled: false,
+  autoLaunchBusy: false,
+  autoLaunchNote: "",
+  logStickBottom: true,
+  logScrollTop: 0,
+  chatStickBottom: true,
+  chatScrollTop: 0,
+  pageScrollTops: {},
+  aiAdvancedOpen: false,
+  weixinLogin: null,
+  weixinBusy: "",
+};
+
+let refreshHandle = 0;
+let refreshIntervalMs = 0;
+let refreshListenersBound = false;
+let weixinLoginPollHandle = 0;
+
 const els = {
+  shell: document.querySelector(".shell"),
   nav: document.getElementById("nav"),
   content: document.getElementById("content"),
   title: document.getElementById("pageTitle"),
@@ -62,10 +76,12 @@ async function init() {
   renderShellLoading();
   try {
     await refreshBootstrapWithRetry();
-    await refreshUpdaterState();
-    setInterval(refreshRuntime, 5000);
+    await refreshUpdaterState(false);
+    await refreshAutoLaunchState(false);
+    ensurePollingStarted();
+    render();
   } catch (error) {
-    state.bootstrapError = `桌面后端尚未就绪：${error.message || error}`;
+    state.bootstrapError = describeBootstrapError(error);
     renderShellLoading();
     scheduleBootstrapRetry();
   }
@@ -73,14 +89,14 @@ async function init() {
 
 async function refreshBootstrapWithRetry() {
   let lastError = null;
-  for (let attempt = 0; attempt < 12; attempt += 1) {
+  for (let attempt = 1; attempt <= 12; attempt += 1) {
     try {
       await refreshBootstrap();
       state.bootstrapError = "";
       return;
     } catch (error) {
       lastError = error;
-      state.bootstrapError = `正在等待桌面后端启动...（第 ${attempt + 1} 次）：${error.message || error}`;
+      state.bootstrapError = `正在等待桌面后端启动（第 ${attempt} 次）`;
       renderShellLoading();
       await sleep(1000);
     }
@@ -92,55 +108,103 @@ function scheduleBootstrapRetry() {
   window.setTimeout(async () => {
     try {
       await refreshBootstrapWithRetry();
-      await refreshUpdaterState();
-      setInterval(refreshRuntime, 5000);
+      await refreshUpdaterState(false);
+      await refreshAutoLaunchState(false);
+      ensurePollingStarted();
+      render();
     } catch (error) {
-      state.bootstrapError = `桌面后端启动失败：${error.message || error}`;
+      state.bootstrapError = describeBootstrapError(error);
       renderShellLoading();
       scheduleBootstrapRetry();
     }
   }, 3000);
 }
 
+function describeBootstrapError(error) {
+  const raw = String(error?.message || error || "").trim();
+  if (!raw || raw === "Failed to fetch") return "桌面后端仍在启动，请稍候。";
+  return `桌面后端启动失败：${raw}`;
+}
+
 async function refreshBootstrap() {
-  state.bootstrap = await fetchJson("/api/bootstrap");
-  state.draft = clone(state.bootstrap.config);
+  const payload = await fetchJson("/api/bootstrap");
+  state.bootstrap = payload;
+  state.draft = clone(payload.config);
+  ensureDesktopConfig(state.bootstrap.config);
+  ensureDesktopConfig(state.draft);
   state.provider = state.draft.agents.defaults.provider || "openrouter";
   await refreshLogs();
   await refreshSessions();
   if (!state.selectedSessionKey && state.sessions.length) state.selectedSessionKey = state.sessions[0].key;
   await refreshSelectedSession();
-  render();
 }
 
 async function refreshRuntime() {
   if (!state.bootstrap) return;
   captureLogScroll();
-  if (state.tab === "chat") captureChatScroll();
   try {
     const payload = await fetchJson("/api/bootstrap");
     state.bootstrap.status = payload.status;
-    state.bootstrap.skills = payload.skills;
     state.bootstrap.meta = payload.meta;
+    state.bootstrap.skills = payload.skills;
+    state.bootstrap.config = payload.config;
+    state.bootstrap.weixin = payload.weixin;
+    ensureDesktopConfig(state.bootstrap.config);
     await refreshLogs();
-    if (state.tab === "chat") {
-      await refreshSessions();
-      await refreshSelectedSession(false);
-    }
     renderHeader();
-    if (["overview", "runtime", "skills", "chat"].includes(state.tab)) renderBody();
+    if (["dashboard", "logs", "skills"].includes(state.tab)) renderBody();
   } catch (error) {
-    state.bootstrapError = `运行状态刷新失败：${error.message || error}`;
+    state.bootstrapError = `状态刷新失败：${error.message || error}`;
     renderHeader();
   }
+}
+
+async function refreshChatData() {
+  if (!state.bootstrap) return;
+  captureChatScroll();
+  try {
+    const payload = await fetchJson("/api/bootstrap");
+    state.bootstrap.status = payload.status;
+    state.bootstrap.meta = payload.meta;
+    state.bootstrap.skills = payload.skills;
+    state.bootstrap.weixin = payload.weixin;
+    await refreshSessions();
+    await refreshSelectedSession();
+    renderHeader();
+    renderBody();
+  } catch (error) {
+    state.bootstrapError = `聊天刷新失败：${error.message || error}`;
+    renderHeader();
+  }
+}
+
+function ensurePollingStarted() {
+  const nextIntervalMs = currentRefreshIntervalMs();
+  if (refreshHandle && refreshIntervalMs === nextIntervalMs) return;
+  if (refreshHandle) window.clearInterval(refreshHandle);
+  refreshIntervalMs = nextIntervalMs;
+  refreshHandle = window.setInterval(() => void refreshVisibleData(), nextIntervalMs);
+  if (!refreshListenersBound) {
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) void refreshVisibleData();
+    });
+    window.addEventListener("focus", () => void refreshVisibleData());
+    refreshListenersBound = true;
+  }
+}
+
+async function refreshVisibleData() {
+  if (state.tab === "chat") {
+    await refreshChatData();
+    return;
+  }
+  await refreshRuntime();
 }
 
 async function refreshLogs() {
   const payload = await fetchJson("/api/logs?name=gateway&lines=220");
   state.logs = payload.lines || [];
-  if (state.bootstrap?.status && payload.archives) {
-    state.bootstrap.status.logArchives = payload.archives;
-  }
+  if (state.bootstrap?.status) state.bootstrap.status.logArchives = payload.archives || [];
 }
 
 async function refreshSessions() {
@@ -151,7 +215,7 @@ async function refreshSessions() {
   }
 }
 
-async function refreshSelectedSession(renderAfter = false) {
+async function refreshSelectedSession() {
   if (!state.selectedSessionKey) return;
   try {
     const payload = await fetchJson(`/api/session?key=${encodeURIComponent(state.selectedSessionKey)}`);
@@ -161,13 +225,12 @@ async function refreshSelectedSession(renderAfter = false) {
     state.selectedSession = null;
     state.selectedSessionItems = [];
   }
-  if (renderAfter) renderBody();
 }
 
-async function refreshUpdaterState() {
+async function refreshUpdaterState(renderAfter = true) {
   if (!TAURI_INVOKE) {
-    state.updater = fallbackUpdaterState("浏览器调试模式不支持自动更新；安装版中会启用。", false);
-    render();
+    state.updater = fallbackUpdaterState("当前调试模式不接入自动更新。");
+    if (renderAfter) render();
     return;
   }
   try {
@@ -175,14 +238,52 @@ async function refreshUpdaterState() {
   } catch (error) {
     state.updater = fallbackUpdaterState(`读取更新状态失败：${error.message || error}`);
   }
-  render();
+  if (renderAfter) render();
+}
+
+async function refreshAutoLaunchState(renderAfter = true) {
+  if (!TAURI_INVOKE) {
+    state.autoLaunchSupported = false;
+    state.autoLaunchEnabled = false;
+    state.autoLaunchNote = "当前调试模式不显示系统自启动状态。";
+    if (renderAfter) render();
+    return;
+  }
+  try {
+    applyAutoLaunchPayload(await invokeTauri("autostart_status"));
+  } catch (error) {
+    state.autoLaunchSupported = false;
+    state.autoLaunchEnabled = false;
+    state.autoLaunchNote = `读取开机自启动失败：${error.message || error}`;
+  }
+  if (renderAfter) render();
+}
+
+async function setAutoLaunch(enabled) {
+  if (!TAURI_INVOKE || state.autoLaunchBusy) return;
+  state.autoLaunchBusy = true;
+  renderBody();
+  try {
+    applyAutoLaunchPayload(await invokeTauri("set_autostart", { enabled }));
+    state.lastSaveMessage = enabled ? "已开启桌面程序开机自启动。" : "已关闭桌面程序开机自启动。";
+  } catch (error) {
+    state.autoLaunchNote = `设置开机自启动失败：${error.message || error}`;
+  } finally {
+    state.autoLaunchBusy = false;
+    render();
+  }
+}
+
+function applyAutoLaunchPayload(payload) {
+  state.autoLaunchSupported = Boolean(payload?.supported);
+  state.autoLaunchEnabled = Boolean(payload?.enabled);
+  state.autoLaunchNote = payload?.note || "";
+  if (state.bootstrap?.config) ensureDesktopConfig(state.bootstrap.config).app.autoLaunch = state.autoLaunchEnabled;
+  if (state.draft) ensureDesktopConfig(state.draft).app.autoLaunch = state.autoLaunchEnabled;
 }
 
 async function saveConfig({ restartAfterSave }) {
-  if (!state.draft) {
-    window.alert("桌面后端尚未就绪，请稍等几秒后重试。");
-    return;
-  }
+  if (!state.draft || state.saveBusy || state.saveRestartBusy) return;
   if (!isDirty() && !restartAfterSave) return;
   if (restartAfterSave) state.saveRestartBusy = true;
   else state.saveBusy = true;
@@ -196,30 +297,44 @@ async function saveConfig({ restartAfterSave }) {
     state.bootstrap.config = payload.config;
     state.bootstrap.skills = payload.skills;
     state.draft = clone(payload.config);
-    state.lastSaveMessage = restartAfterSave ? "配置已保存，正在重启 Gateway..." : "配置已保存。关键配置建议重启 Gateway 后生效。";
-    state.restartRecommended = !restartAfterSave;
+    ensureDesktopConfig(state.bootstrap.config);
+    ensureDesktopConfig(state.draft);
+    ensurePollingStarted();
     if (restartAfterSave) {
-      await gatewayAction(state.bootstrap.status.running ? "restart" : "start", { renderAfter: false });
+      await gatewayAction(state.bootstrap.status.running ? "restart" : "start", false);
       state.lastSaveMessage = "配置已保存，并已重启 Gateway。";
       state.restartRecommended = false;
+    } else {
+      state.lastSaveMessage = "配置已保存。涉及模型、渠道、MCP 的改动建议重启 Gateway。";
+      state.restartRecommended = true;
     }
-    render();
   } finally {
     state.saveBusy = false;
     state.saveRestartBusy = false;
-    renderHeader();
+    render();
   }
 }
 
-async function gatewayAction(action, options = {}) {
-  const payload = await fetchJson(`/api/gateway/${action}`, { method: "POST" });
-  if (state.bootstrap) state.bootstrap.status = payload.status;
-  await refreshLogs();
-  if (["start", "restart"].includes(action)) {
-    state.restartRecommended = false;
-    if (!isDirty()) state.lastSaveMessage = "Gateway 已重新加载当前配置。";
+async function gatewayAction(action, renderAfter = true) {
+  if (!state.bootstrap || state.gatewayBusy) return;
+  state.gatewayBusy = action;
+  renderBody();
+  try {
+    const payload = await fetchJson(`/api/gateway/${action}`, { method: "POST" });
+    state.bootstrap.status = payload.status;
+    await refreshLogs();
+    if (action === "restart" || action === "start") {
+      state.restartRecommended = false;
+      if (!isDirty()) state.lastSaveMessage = "Gateway 已加载当前配置。";
+    } else if (action === "stop") {
+      state.lastSaveMessage = "Gateway 已停止。";
+    }
+  } catch (error) {
+    state.lastSaveMessage = `Gateway ${action} 失败：${error.message || error}`;
+  } finally {
+    state.gatewayBusy = "";
   }
-  if (options.renderAfter !== false) render();
+  if (renderAfter) render();
 }
 
 async function checkUpdates() {
@@ -229,10 +344,10 @@ async function checkUpdates() {
   try {
     state.updater = await invokeTauri("check_for_updates");
   } catch (error) {
-    state.updater = { ...state.updater, note: `检查更新失败：${error.message || error}` };
+    state.updater = fallbackUpdaterState(`检查更新失败：${error.message || error}`);
   } finally {
     state.updaterBusy = "";
-    render();
+    renderBody();
   }
 }
 
@@ -242,9 +357,9 @@ async function installUpdate() {
   renderBody();
   try {
     state.updater = await invokeTauri("install_update");
-    state.updater.note = `${state.updater.note} 更新已安装，请关闭并重新打开应用。`;
+    state.lastSaveMessage = "更新已安装，关闭桌面端后重新打开即可。";
   } catch (error) {
-    state.updater = { ...state.updater, note: `安装更新失败：${error.message || error}` };
+    state.updater = fallbackUpdaterState(`安装更新失败：${error.message || error}`);
   } finally {
     state.updaterBusy = "";
     render();
@@ -252,9 +367,9 @@ async function installUpdate() {
 }
 
 async function sendChatMessage() {
-  if (state.selectedSessionKey !== "desktop:console") return;
+  if (state.chatBusy || state.selectedSessionKey !== "desktop:console") return;
   const content = state.chatDraft.trim();
-  if (!content || state.chatBusy) return;
+  if (!content) return;
   state.chatBusy = true;
   renderBody();
   try {
@@ -274,9 +389,10 @@ async function sendChatMessage() {
     renderBody();
   }
 }
+
 async function clearChatHistory() {
-  if (state.selectedSessionKey !== "desktop:console" || state.chatBusy) return;
-  if (!window.confirm("确定清空桌面内测试聊天记录吗？")) return;
+  if (state.chatBusy || state.selectedSessionKey !== "desktop:console") return;
+  if (!window.confirm("确定清空桌面测试会话吗？")) return;
   state.chatBusy = true;
   renderBody();
   try {
@@ -290,7 +406,7 @@ async function clearChatHistory() {
 }
 
 async function createSkill() {
-  const name = window.prompt("请输入新 skill 名称，仅支持字母、数字、点、下划线和短横线");
+  const name = window.prompt("请输入新 Skill 名称");
   if (!name) return;
   try {
     const payload = await fetchJson("/api/skill/create", {
@@ -299,15 +415,15 @@ async function createSkill() {
       body: JSON.stringify({ name }),
     });
     state.bootstrap.skills = payload.skills;
-    state.lastSaveMessage = `已创建 skill：${payload.created.name}`;
+    state.lastSaveMessage = `已创建 Skill：${payload.created.name}`;
     render();
   } catch (error) {
-    window.alert(`创建 skill 失败：${error.message || error}`);
+    window.alert(`创建 Skill 失败：${error.message || error}`);
   }
 }
 
 async function deleteSkill(name) {
-  if (!window.confirm(`确定删除 workspace skill '${name}' 吗？`)) return;
+  if (!window.confirm(`确定删除 Skill '${name}' 吗？`)) return;
   try {
     const payload = await fetchJson("/api/skill/delete", {
       method: "POST",
@@ -315,10 +431,10 @@ async function deleteSkill(name) {
       body: JSON.stringify({ name }),
     });
     state.bootstrap.skills = payload.skills;
-    state.lastSaveMessage = `已删除 skill：${name}`;
+    state.lastSaveMessage = `已删除 Skill：${name}`;
     render();
   } catch (error) {
-    window.alert(`删除 skill 失败：${error.message || error}`);
+    window.alert(`删除 Skill 失败：${error.message || error}`);
   }
 }
 
@@ -334,8 +450,189 @@ async function openTarget(target) {
   }
 }
 
+function qrImageUrl(value) {
+  return `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(String(value || ""))}`;
+}
+
+async function refreshWeixinStatus(renderAfter = true) {
+  const payload = await fetchJson("/api/weixin/status");
+  if (state.bootstrap) state.bootstrap.weixin = payload.status || {};
+  if (renderAfter) renderBody();
+}
+
+async function ensureWeixinApiReady() {
+  if (!state.bootstrap.weixin?.apiRunning) {
+    await fetchJson("/api/weixin/api/start", { method: "POST" });
+    await refreshWeixinStatus(false);
+  }
+}
+
+async function weixinAction(action, payload = null) {
+  if (state.weixinBusy) return;
+  state.weixinBusy = action;
+  renderBody();
+  try {
+    if (action === "startApi") {
+      await fetchJson("/api/weixin/api/start", { method: "POST" });
+      await refreshWeixinStatus(false);
+      state.lastSaveMessage = "微信接口已启动。";
+    } else if (action === "stopApi") {
+      await fetchJson("/api/weixin/api/stop", { method: "POST" });
+      stopWeixinLoginPolling();
+      state.weixinLogin = null;
+      await refreshWeixinStatus(false);
+      state.lastSaveMessage = "微信接口已停止。";
+    } else if (action === "startLogin") {
+      await ensureWeixinApiReady();
+      const result = await fetchJson("/api/weixin/login/start", { method: "POST" });
+      state.weixinLogin = {
+        loginId: result.loginId,
+        qrcode: result.qrcode,
+        qrUrl: result.qrUrl,
+        status: result.status || "pending",
+      };
+      startWeixinLoginPolling();
+      state.lastSaveMessage = "已生成微信二维码。";
+    } else if (action === "startBridge") {
+      await fetchJson("/api/weixin/bridge/start", { method: "POST" });
+      await refreshWeixinStatus(false);
+      state.lastSaveMessage = "微信桥接已启动。";
+    } else if (action === "stopBridge") {
+      await fetchJson("/api/weixin/bridge/stop", { method: "POST" });
+      await refreshWeixinStatus(false);
+      state.lastSaveMessage = "微信桥接已停止。";
+    } else if (action === "logout") {
+      await fetchJson("/api/weixin/logout", { method: "POST" });
+      stopWeixinLoginPolling();
+      state.weixinLogin = null;
+      await refreshWeixinStatus(false);
+      state.lastSaveMessage = "微信登录状态已清空。";
+    } else if (action === "refresh") {
+      await refreshWeixinStatus(false);
+    }
+    renderHeader();
+    renderBody();
+  } catch (error) {
+    const message = String(error?.message || error || "");
+    if (message.includes("login_not_found")) {
+      stopWeixinLoginPolling();
+      state.weixinLogin = null;
+      state.lastSaveMessage = "二维码会话已失效，请重新扫码登录。";
+      renderHeader();
+      renderBody();
+      return;
+    }
+    window.alert(`微信操作失败：${message}`);
+    renderBody();
+  } finally {
+    state.weixinBusy = "";
+    renderBody();
+  }
+}
+
+function stopWeixinLoginPolling() {
+  if (weixinLoginPollHandle) window.clearTimeout(weixinLoginPollHandle);
+  weixinLoginPollHandle = 0;
+}
+
+async function syncWeixinEnabled(enabled) {
+  if (state.weixinBusy) return;
+  applyValue("channels.weixin.enabled", enabled);
+  renderHeader();
+  renderBody();
+  state.weixinBusy = enabled ? "enable" : "disable";
+  renderBody();
+  try {
+    if (enabled) {
+      await ensureWeixinApiReady();
+      if (state.bootstrap.weixin?.loggedIn && !state.bootstrap.weixin?.bridge?.running) {
+        await fetchJson("/api/weixin/bridge/start", { method: "POST" });
+        await refreshWeixinStatus(false);
+        state.lastSaveMessage = "微信渠道已开启。";
+      } else {
+        state.lastSaveMessage = "微信渠道已开启，请扫码登录。";
+      }
+    } else {
+      stopWeixinLoginPolling();
+      state.weixinLogin = null;
+      try {
+        await fetchJson("/api/weixin/bridge/stop", { method: "POST" });
+      } catch {}
+      try {
+        await fetchJson("/api/weixin/api/stop", { method: "POST" });
+      } catch {}
+      await refreshWeixinStatus(false);
+      state.lastSaveMessage = "微信渠道已关闭。";
+    }
+  } catch (error) {
+    applyValue("channels.weixin.enabled", !enabled);
+    await refreshWeixinStatus(false);
+    window.alert(`微信渠道切换失败：${error.message || error}`);
+  } finally {
+    state.weixinBusy = "";
+    renderHeader();
+    renderBody();
+  }
+}
+
+function startWeixinLoginPolling() {
+  stopWeixinLoginPolling();
+  weixinLoginPollHandle = window.setTimeout(() => {
+    void pollWeixinLoginOnce();
+  }, 1600);
+}
+
+async function pollWeixinLoginOnce() {
+  if (!state.weixinLogin?.loginId) return;
+  let payload;
+  try {
+    payload = await fetchJson(`/api/weixin/login/status?loginId=${encodeURIComponent(state.weixinLogin.loginId)}`);
+  } catch (error) {
+    const message = String(error?.message || error || "");
+    if (message.includes("login_not_found")) {
+      stopWeixinLoginPolling();
+      state.weixinLogin = null;
+      state.lastSaveMessage = "二维码会话已失效，请重新扫码登录。";
+      await refreshWeixinStatus(false);
+      renderHeader();
+      renderBody();
+      return;
+    }
+    state.lastSaveMessage = "正在等待微信扫码状态更新…";
+    startWeixinLoginPolling();
+    renderHeader();
+    renderBody();
+    return;
+  }
+  const status = payload.status || "pending";
+  state.weixinLogin = { ...state.weixinLogin, status };
+  if (status === "confirmed") {
+    await refreshWeixinStatus(false);
+    state.lastSaveMessage = "微信已登录。";
+    stopWeixinLoginPolling();
+    if ((state.draft.channels.weixin || {}).enabled && !state.bootstrap.weixin?.bridge?.running) {
+      await fetchJson("/api/weixin/bridge/start", { method: "POST" });
+      await refreshWeixinStatus(false);
+      state.lastSaveMessage = "微信已登录，并已自动启动桥接。";
+    }
+  } else if (status === "expired") {
+    state.lastSaveMessage = "二维码已过期，请重新生成。";
+    stopWeixinLoginPolling();
+  } else {
+    startWeixinLoginPolling();
+  }
+  renderHeader();
+  renderBody();
+}
+
 async function copyLogs() {
   await copyText(logText());
+}
+
+function clearLogView() {
+  state.logs = [];
+  state.logStickBottom = true;
+  renderBody();
 }
 
 async function copyText(text) {
@@ -351,41 +648,73 @@ async function copyText(text) {
 }
 
 function render() {
+  renderShellFrame();
   renderNav();
   renderHeader();
   renderBody();
 }
 
+function renderShellFrame() {
+  const chatImmersive = state.tab === "chat" && !state.isMainNavVisible;
+  els.shell.classList.toggle("nav-hidden", !state.isMainNavVisible);
+  els.shell.classList.toggle("chat-immersive", chatImmersive);
+  els.content.dataset.tab = state.tab;
+}
+
 function renderShellLoading() {
-  els.title.textContent = "概览";
+  renderShellFrame();
+  els.title.textContent = "仪表盘";
   els.gatewayDot.className = "status-dot";
   els.gatewayLabel.textContent = state.bootstrapError || "正在启动桌面后端...";
-  els.versionMeta.textContent = state.updater?.currentVersion ? `Desktop ${state.updater.currentVersion}` : "正在准备运行环境";
+  els.versionMeta.textContent = "正在准备运行环境";
   els.nav.innerHTML = "";
   els.saveBtn.disabled = true;
   els.saveRestartBtn.disabled = true;
   els.saveState.textContent = state.bootstrapError || "等待桌面后端响应";
-  els.content.innerHTML = `<div class="empty startup-empty">${esc(state.bootstrapError || "正在初始化控制台，请稍候几秒...")}</div>`;
+  els.content.innerHTML = `
+    <section class="loading-panel">
+      <div class="loading-orb"></div>
+      <div class="loading-copy">
+        <p class="eyebrow">Desktop Control Plane</p>
+        <h3>正在初始化控制台</h3>
+        <p class="muted">${esc(state.bootstrapError || "正在连接本地后端、Gateway 与会话索引，请稍候。")}</p>
+      </div>
+    </section>
+  `;
 }
 
 function renderNav() {
-  els.nav.innerHTML = tabs.map(([id, label, hint]) => `
-    <button class="nav-button ${state.tab === id ? "active" : ""}" data-tab="${id}">
-      <strong>${label}</strong>
-      <span>${hint}</span>
+  els.nav.innerHTML = tabs.map((tab) => `
+    <button class="nav-button ${state.tab === tab.id ? "active" : ""}" data-tab="${tab.id}">
+      <span class="nav-icon">${tab.short}</span>
+      <span class="nav-copy">
+        <strong>${tab.label}</strong>
+        <em>${tab.hint}</em>
+      </span>
     </button>
   `).join("");
   for (const button of els.nav.querySelectorAll("[data-tab]")) {
-    button.onclick = () => {
-      state.tab = button.dataset.tab;
-      if (state.tab === "chat") {
-        state.chatStickBottom = true;
-        state.chatScrollTop = 0;
-        refreshSelectedSession(true);
-      }
-      else render();
-    };
+    button.onclick = () => setTab(button.dataset.tab);
   }
+}
+
+function setTab(tabId) {
+  capturePageScroll();
+  state.tab = tabId;
+  state.isMainNavVisible = tabId !== "chat";
+  if (tabId === "chat") {
+    state.chatStickBottom = true;
+    state.chatScrollTop = 0;
+    render();
+    void refreshChatData();
+    return;
+  }
+  render();
+}
+
+function setChatImmersive(enabled) {
+  state.isMainNavVisible = !enabled;
+  render();
 }
 
 function renderHeader() {
@@ -393,21 +722,23 @@ function renderHeader() {
     renderShellLoading();
     return;
   }
-  const current = tabs.find(([id]) => id === state.tab);
+  const current = tabs.find((item) => item.id === state.tab);
+  const hiddenTitleMap = { chat: "聊天" };
   const running = Boolean(state.bootstrap.status.running);
-  els.title.textContent = current?.[1] || "概览";
+  els.title.textContent = current?.label || hiddenTitleMap[state.tab] || "仪表盘";
   els.gatewayDot.className = `status-dot ${running ? "online" : "offline"}`;
-  els.gatewayLabel.textContent = running ? `Gateway 运行中 · PID ${state.bootstrap.status.pid}` : "Gateway 未运行";
+  els.gatewayLabel.textContent = gatewayStatusSummary();
   els.versionMeta.textContent = `Desktop ${state.bootstrap.meta.desktopVersion} · Nanobot ${state.bootstrap.meta.nanobotVersion}`;
   const disableSave = state.saveBusy || state.saveRestartBusy || !isDirty();
   els.saveBtn.disabled = disableSave;
   els.saveRestartBtn.disabled = state.saveBusy || state.saveRestartBusy || (!isDirty() && !running);
   els.saveBtn.textContent = state.saveBusy ? "保存中..." : "保存配置";
   els.saveRestartBtn.textContent = state.saveRestartBusy ? "处理中..." : "保存并重启 Gateway";
-  if (state.saveBusy || state.saveRestartBusy) els.saveState.textContent = "正在提交配置...";
-  else if (isDirty()) els.saveState.textContent = "有未保存的修改";
-  else if (state.restartRecommended) els.saveState.textContent = state.lastSaveMessage || "配置已保存，建议重启 Gateway 使 AI / 渠道修改生效。";
-  else els.saveState.textContent = state.lastSaveMessage || "配置已同步";
+  if (state.saveBusy || state.saveRestartBusy) els.saveState.textContent = "正在提交配置变更";
+  else if (isDirty()) els.saveState.textContent = "存在未保存修改";
+  else if (state.lastSaveMessage) els.saveState.textContent = state.lastSaveMessage;
+  else if (!running && state.bootstrap.status.note) els.saveState.textContent = state.bootstrap.status.note;
+  else els.saveState.textContent = running ? "Gateway 已连接" : "Gateway 当前未运行";
 }
 
 function renderBody() {
@@ -415,62 +746,276 @@ function renderBody() {
     renderShellLoading();
     return;
   }
-  const pages = { overview: pageOverview, chat: pageChat, ai: pageAi, channels: pageChannels, mcp: pageMcp, skills: pageSkills, runtime: pageRuntime };
-  els.content.innerHTML = pages[state.tab]();
+  capturePageScroll();
+  const pages = { dashboard: pageDashboard, chat: pageChat, ai: pageAi, channels: pageChannels, skills: pageSkills, logs: pageLogs };
+  els.content.innerHTML = (pages[state.tab] || pageDashboard)();
   bindPage();
+  restorePageScroll();
   restoreLogScroll();
   restoreChatScroll();
 }
 
-function pageOverview() {
+function pageDashboard() {
+  const desktop = ensureDesktopConfig(state.draft);
   const channels = enabledChannels();
+  const refreshSeconds = desktop.chat.refreshIntervalSeconds || 3;
   return `
-    <div class="page-grid">
-      ${state.restartRecommended ? `<div class="notice warn">${esc(state.lastSaveMessage || "配置已保存，建议重启 Gateway 使关键配置生效。")}</div>` : ""}
-      <div class="stat-grid">
-        <article class="stat-card"><p class="eyebrow">已启用渠道</p><strong>${channels.length}</strong><p class="muted">${channels.join(" / ") || "尚未启用"}</p></article>
-        <article class="stat-card"><p class="eyebrow">会话数量</p><strong>${state.sessions.length}</strong><p class="muted">按 channel:chat_id 拆分</p></article>
-        <article class="stat-card"><p class="eyebrow">MCP Servers</p><strong>${Object.keys(state.draft.tools.mcpServers || {}).length}</strong><p class="muted">远程能力入口</p></article>
-        <article class="stat-card"><p class="eyebrow">Skills</p><strong>${state.bootstrap.skills.items.length}</strong><p class="muted">内置 + 工作区</p></article>
-      </div>
-      <div class="split-panel">
-        <section class="panel stack">
-          <div>
-            <p class="eyebrow">Quick Start</p>
-            <h3>上手路径</h3>
-            <p class="muted">概览页只保留状态摘要和常用入口。Gateway 控制、自动更新和日志诊断统一放在“运行控制”里，避免功能重复。</p>
+    <div class="dashboard-page">
+      <section class="stats-grid dashboard-stats">
+        ${statCard("Gateway 状态", state.bootstrap.status.running ? "运行中" : "已停止", gatewaySummaryLine())}
+        ${statCard("已启用渠道", String(channels.length), channels.join(" / ") || "尚未启用任何渠道")}
+        ${statCard("会话总数", String(state.sessions.length), "真实渠道会话与桌面测试会话")}
+        ${statCard("Skills 数量", String(state.bootstrap.skills.items.length), "内置技能与工作区自定义技能")}
+      </section>
+      <section class="dashboard-middle">
+        <article class="panel stack-card dashboard-card">
+          <div class="section-head">
+            <div><p class="eyebrow">Core Controls</p><h4>核心控制</h4></div>
+            <button class="button button-ghost" id="refreshDashboardStateBtn">刷新状态</button>
           </div>
-          <div class="button-row">
-            <button class="button button-primary" data-switch-tab="ai">先配 AI</button>
-            <button class="button" data-switch-tab="channels">再配渠道</button>
-            <button class="button" data-switch-tab="chat">查看聊天</button>
-            <button class="button" data-switch-tab="runtime">运行控制</button>
+          ${state.bootstrap.status.note ? `<div class="notice warn">${esc(state.bootstrap.status.note)}</div>` : ""}
+          <div class="dashboard-action-group">
+            <button class="action-pill success" data-gateway="start" ${state.gatewayBusy ? "disabled" : ""}>${state.gatewayBusy === "start" ? "启动中..." : "启动"}</button>
+            <button class="action-pill neutral" data-gateway="restart" ${state.gatewayBusy ? "disabled" : ""}>${state.gatewayBusy === "restart" ? "重启中..." : "重启"}</button>
+            <button class="action-pill danger" data-gateway="stop" ${state.gatewayBusy ? "disabled" : ""}>${state.gatewayBusy === "stop" ? "停止中..." : "停止"}</button>
           </div>
-          <div class="step-list">
-            <div class="mini-card"><p class="eyebrow">1</p><strong>AI 配置</strong><div class="table-note">优先填写地址、Key、模型名。</div></div>
-            <div class="mini-card"><p class="eyebrow">2</p><strong>保存并重启</strong><div class="table-note">模型、渠道、MCP 改完建议立即重启 Gateway。</div></div>
-            <div class="mini-card"><p class="eyebrow">3</p><strong>聊天验证</strong><div class="table-note">先用桌面测试聊天，再到 Telegram / 飞书实测。</div></div>
-          </div>
-        </section>
-        <section class="panel stack">
-          <div>
-            <p class="eyebrow">Current Setup</p>
-            <h3>当前摘要</h3>
-            <p class="muted">路径信息改为按钮入口，避免长本地路径挤占空间。</p>
-          </div>
-          <div class="quick-grid">
-            <div class="mini-card"><p class="eyebrow">Provider</p><strong>${esc(state.draft.agents.defaults.provider)}</strong></div>
-            <div class="mini-card"><p class="eyebrow">模型</p><strong>${esc(state.draft.agents.defaults.model)}</strong></div>
-            <div class="mini-card"><p class="eyebrow">Gateway</p><strong>${state.bootstrap.status.running ? "运行中" : "未运行"}</strong></div>
-          </div>
-          <div class="button-row">
-            <button class="button" data-open-target="config">打开配置</button>
+          <div class="dashboard-shortcuts">
+            <button class="button button-primary" data-switch-tab="chat">进入聊天</button>
+            <button class="button" data-open-target="config">打开配置文件</button>
             <button class="button" data-open-target="workspace">打开工作区</button>
-            <button class="button" data-open-target="logs">打开日志</button>
-            <button class="button" data-open-target="skills">打开 Skills</button>
+            <button class="button" data-open-target="logs">打开日志目录</button>
+            <button class="button" data-open-target="skills">打开 Skills 目录</button>
           </div>
-          <div class="table-note">如需看运行日志、控制 Gateway 或检查更新，请进入“运行控制”。</div>
+        </article>
+        <article class="panel stack-card dashboard-card">
+          <div class="section-head"><div><p class="eyebrow">System Settings</p><h4>系统设置</h4></div></div>
+          <div class="dashboard-settings">
+            <div class="dashboard-setting">
+              <div class="dashboard-setting-copy">
+                <strong>打开桌面后自动启动 Gateway</strong>
+                <p class="muted">下次打开桌面端时生效</p>
+              </div>
+              <label class="switch"><input type="checkbox" data-field-path="desktop.gateway.autoStart" data-field-type="toggle" ${desktop.gateway.autoStart ? "checked" : ""}><span></span></label>
+            </div>
+            <div class="dashboard-setting">
+              <div class="dashboard-setting-copy">
+                <strong>桌面程序开机自启动</strong>
+                <p class="muted">${esc(state.autoLaunchNote || "写入系统启动项")}</p>
+              </div>
+              <button class="button button-ghost" id="toggleAutoLaunchBtn" ${state.autoLaunchBusy || !state.autoLaunchSupported ? "disabled" : ""}>${state.autoLaunchEnabled ? "已开启" : "已关闭"}</button>
+            </div>
+            <div class="dashboard-setting">
+              <div class="dashboard-setting-copy">
+                <strong>聊天页自动刷新间隔</strong>
+                <p class="muted">当前 ${refreshSeconds}s</p>
+              </div>
+              <div class="dashboard-setting-control">
+                <input class="inline-number" type="number" min="1" max="60" step="1" value="${escAttr(String(refreshSeconds))}" data-field-path="desktop.chat.refreshIntervalSeconds" data-field-type="number">
+                <span class="pill">${refreshSeconds}s</span>
+              </div>
+            </div>
+          </div>
+          <div class="dashboard-updater">
+            <div>
+              <p class="eyebrow">Updater</p>
+              <strong>当前版本 ${esc(state.updater.currentVersion || state.bootstrap.meta.desktopVersion)}</strong>
+              <p class="muted">${esc(state.updater.note || "检查是否有可用桌面更新")}</p>
+            </div>
+            <div class="dashboard-updater-actions">
+              <button class="button button-primary" id="checkUpdatesBtn" ${state.updaterBusy ? "disabled" : ""}>${state.updaterBusy === "check" ? "检查中..." : "检查更新"}</button>
+              <button class="button" data-switch-tab="logs">查看日志</button>
+            </div>
+          </div>
+        </article>
+      </section>
+    </div>
+  `;
+}
+
+function pageChatLegacy() {
+  return pageChat();
+}
+
+function pageChat() {
+  return pageChatLegacy();
+}
+
+function pageAiLegacy() {
+  return pageAi();
+}
+
+function pageAi() {
+  const providers = state.bootstrap.schema.providers || [];
+  const current = providers.find((item) => item.key === state.provider) || providers[0] || { key: "", label: "" };
+  const agentFields = state.bootstrap.schema.agents || [];
+  const webFields = state.bootstrap.schema.tools.web || [];
+  const rootFields = state.bootstrap.schema.tools.root || [];
+  const providerFields = current.fields || [];
+  const basicProviderFields = [
+    mergeField(providerFields, "apiKey", { key: "apiKey", label: "API Key", type: "password" }),
+    mergeField(providerFields, "apiBase", { key: "apiBase", label: "API Base", type: "text" }),
+  ];
+  const advancedProviderFields = [
+    mergeField(providerFields, "extraHeaders", { key: "extraHeaders", label: "额外请求头", type: "json" }),
+  ];
+  const requiredAgentFields = [
+    mergeField(agentFields, "model", { key: "model", label: "默认模型", type: "text" }),
+  ];
+  const modelTuningFields = pickFields(agentFields, ["contextWindowTokens", "maxTokens", "temperature"]);
+  const toolAgentFields = pickFields(agentFields, ["reasoningEffort", "maxToolIterations"]);
+  const networkFields = [
+    renderFields(state.draft.agents.defaults, pickFields(agentFields, ["workspace"]), "agents.defaults"),
+    renderFields(state.draft.tools, pickFields(rootFields, ["restrictToWorkspace"]), "tools"),
+    renderFields(state.draft.tools.web, pickFields(webFields, ["proxy", "search.maxResults"]), "tools.web"),
+  ].join("");
+  const developerFields = [
+    renderFields(state.draft.tools.web, pickFields(webFields, ["search.provider", "search.apiKey", "search.baseUrl"]), "tools.web"),
+    renderFields(state.draft.providers[current.key] || {}, advancedProviderFields, `providers.${current.key}`),
+    renderFields(state.draft.agents.defaults, toolAgentFields, "agents.defaults"),
+  ].join("");
+  const modelValue = String(getValue(state.draft.agents.defaults, "model") || "未设置");
+  return pageFrame(`
+    <div class="page-stack page-scroll-stack workspace-page">
+      <section class="workspace-hero ai-hero">
+        <div class="workspace-hero-copy">
+          <p class="eyebrow">AI 配置</p>
+          <h3>模型接入</h3>
+          <div class="workspace-chip-row">
+            <span class="workspace-chip strong">${esc(providerDisplayName(current.key, current.label))}</span>
+            <span class="workspace-chip mono-chip" title="${escAttr(modelValue)}">${esc(shortPath(modelValue))}</span>
+            <span class="workspace-chip">${state.aiAdvancedOpen ? "高级参数已展开" : "高级参数已收起"}</span>
+          </div>
+        </div>
+        <section class="workspace-hero-side ai-provider-card">
+          <label class="field-card ai-provider-picker">
+            <span class="field-label">AI 服务商</span>
+            <select data-field-path="agents.defaults.provider" data-field-type="text">
+              ${providers.map((item) => `<option value="${escAttr(item.key)}" ${item.key === current.key ? "selected" : ""}>${esc(providerDisplayName(item.key, item.label))}</option>`).join("")}
+            </select>
+          </label>
+          <div class="mini-stats">
+            <div class="mini-stat"><span>基础项</span><strong>3</strong></div>
+            <div class="mini-stat"><span>高级分组</span><strong>3</strong></div>
+          </div>
         </section>
+      </section>
+      <section class="page-stack ai-stack workspace-content">
+        <article class="panel stack-card ai-card workspace-card">
+          <div class="section-head workspace-card-head"><div><p class="eyebrow">基础必填项</p><h4>连接主配置</h4></div></div>
+          <div class="form-grid ai-required-grid">
+            ${renderFields(state.draft.agents.defaults, requiredAgentFields, "agents.defaults")}
+            ${renderFields(state.draft.providers[current.key] || {}, basicProviderFields, `providers.${current.key}`)}
+          </div>
+        </article>
+        <section class="panel ai-advanced-shell workspace-card">
+          <button type="button" class="ai-advanced-toggle ${state.aiAdvancedOpen ? "open" : ""}" id="toggleAiAdvancedBtn" aria-expanded="${state.aiAdvancedOpen ? "true" : "false"}">
+            <span class="ai-advanced-toggle-copy">高级运行参数</span>
+            <span class="ai-advanced-chevron" aria-hidden="true">⌄</span>
+          </button>
+          <div class="ai-advanced-content ${state.aiAdvancedOpen ? "open" : ""}" id="aiAdvancedContent">
+            <div class="ai-advanced-content-inner">
+              <div class="ai-advanced-groups">
+                ${renderAiGroup("模型微调", renderFields(state.draft.agents.defaults, modelTuningFields, "agents.defaults"))}
+                ${renderAiGroup("网络与环境", networkFields)}
+                ${renderAiGroup("开发者配置", developerFields)}
+              </div>
+            </div>
+          </div>
+        </section>
+      </section>
+    </div>
+  `);
+}
+
+function pickFields(fields, keys) {
+  const lookup = new Map((fields || []).map((field) => [field.key, field]));
+  return keys.map((key) => lookup.get(key)).filter(Boolean);
+}
+
+function renderAiGroup(title, fieldsHtml) {
+  return `
+    <section class="ai-group-card">
+      <div class="ai-group-head">
+        <h5>${esc(title)}</h5>
+      </div>
+      <div class="form-grid ai-group-grid">${fieldsHtml}</div>
+    </section>
+  `;
+}
+
+function mergeField(fields, key, fallback) {
+  const found = (fields || []).find((field) => field.key === key);
+  if (!found) return fallback;
+  return { ...found, ...fallback };
+}
+
+function pageChannels() {
+  const channels = state.bootstrap.schema.channels || [];
+  const enabled = channels.filter((channel) => (state.draft.channels[channel.key] || channel.defaultConfig || {}).enabled).length;
+  const weixin = state.bootstrap.weixin || {};
+  return pageFrame(`
+    <div class="page-stack page-scroll-stack workspace-page">
+      <section class="workspace-hero">
+        <div class="workspace-hero-copy">
+          <p class="eyebrow">渠道配置</p>
+          <h3>消息入口</h3>
+          <div class="workspace-chip-row">
+            <span class="workspace-chip strong">${enabled} 已启用</span>
+            <span class="workspace-chip">${channels.length} 个渠道</span>
+          </div>
+        </div>
+        <section class="workspace-hero-side workspace-hero-side-tight">
+          <div class="mini-stats">
+            <div class="mini-stat"><span>Telegram</span><strong>${(state.draft.channels.telegram || {}).enabled ? "开" : "关"}</strong></div>
+            <div class="mini-stat"><span>微信</span><strong>${weixin.loggedIn ? "已登录" : (weixin.apiRunning ? "待登录" : "未启动")}</strong></div>
+          </div>
+        </section>
+      </section>
+      <section class="channel-grid channel-grid-redesign">${channels.map((channel) => renderChannelCard(channel)).join("")}</section>
+    </div>
+  `);
+}
+
+function pageMcp() {
+  const servers = state.draft.tools.mcpServers || {};
+  const names = Object.keys(servers);
+  return pageFrame(`
+    <div class="page-stack page-stack-fill workspace-page">
+      <section class="workspace-hero">
+        <div class="workspace-hero-copy">
+          <p class="eyebrow">MCP</p>
+          <h3>连接节点</h3>
+          <div class="workspace-chip-row">
+            <span class="workspace-chip strong">${names.length} 个 Server</span>
+            <span class="workspace-chip">${names.length ? "已配置" : "未配置"}</span>
+          </div>
+        </div>
+        <div class="workspace-hero-side workspace-action-side">
+          <button class="button button-primary" id="addMcpBtn">新增 Server</button>
+          <button class="button" data-open-target="config">打开配置文件</button>
+        </div>
+      </section>
+      ${names.length ? `<section class="card-grid catalog-grid-redesign">${names.map((name) => renderMcpCard(name, servers[name])).join("")}</section>` : renderEmptyState("还没有 MCP Server", "新增第一个连接节点", "新增 Server", "addMcpBtn", "fill-empty-state mcp-empty-state")}
+    </div>
+  `);
+}
+
+function pageSkillsLegacy() {
+  return pageSkills();
+}
+
+function pageLogs() {
+  return `
+    <div class="logs-page">
+      <header class="logs-page-head">
+        <div class="logs-page-actions">
+          <button class="button button-ghost" id="refreshLogsBtn">刷新</button>
+          <button class="button button-ghost" id="clearLogsBtn">清空视图</button>
+          <button class="button button-ghost" id="copyLogsBtn">复制</button>
+        </div>
+      </header>
+      <div class="terminal-shell logs-terminal-shell">
+        <pre class="terminal-window logs-terminal-window" id="gatewayLogPre">${esc(logText())}</pre>
       </div>
     </div>
   `;
@@ -480,218 +1025,354 @@ function pageChat() {
   const selected = state.selectedSession;
   const readonly = selected ? selected.readonly : true;
   return `
-    <div class="page-grid">
-      <section class="panel stack">
-        <div>
-          <p class="eyebrow">Session Viewer</p>
-          <h3>会话窗口</h3>
-          <p class="muted">这里显示真实渠道会话。Telegram、飞书等都会按 channel:chat_id 自动分开保存；桌面测试聊天单独作为一条本地会话。</p>
-        </div>
-        <div class="chat-layout">
-          <div class="panel stack">
-            <div class="card-head align-start"><div><h4>会话列表</h4><p class="muted">同一 Telegram 私聊通常就是一条会话；群聊会是另一条。如果你想在同一 Telegram 私聊里人为拆多个会话，当前核心还不支持。</p></div></div>
-            <div class="session-list">${renderSessionList()}</div>
+    <div class="chat-page immersive">
+      <aside class="chat-rail">
+        <div class="chat-rail-head">
+          <div class="chat-rail-title">
+            <button class="button button-ghost chat-return-button" data-switch-tab="dashboard">返回主页面</button>
+            <div><p class="eyebrow">会话</p><h4>会话列表</h4></div>
           </div>
-          <div class="panel chat-shell">
-            <div class="card-head align-start"><div><h4>${esc(selected?.title || "未选择会话")}</h4><p class="muted">${esc(selected?.subtitle || "")}</p></div><div class="button-row">${readonly ? "" : `<button class="button button-small" id="clearChatBtn" ${state.chatBusy ? "disabled" : ""}>清空本地测试会话</button>`}</div></div>
-            <div class="chat-feed" id="chatFeed">${renderChatFeed()}</div>
-            ${readonly ? `<div class="notice">这是外部渠道会话的只读视图，方便你像聊天窗口一样看消息，不再只盯着日志。发送消息仍然在 Telegram / 飞书等客户端里进行。</div>` : `<div class="chat-compose"><textarea id="chatInput" placeholder="输入一条测试消息。Enter 发送，Shift+Enter 换行。">${esc(state.chatDraft)}</textarea><div class="button-row"><button class="button button-primary" id="sendChatBtn" ${state.chatBusy ? "disabled" : ""}>${state.chatBusy ? "发送中..." : "发送测试消息"}</button></div></div>`}
-          </div>
+          <span class="pill">${state.sessions.length}</span>
         </div>
+        <div class="session-list">${renderSessionList()}</div>
+      </aside>
+      <section class="chat-stage">
+        <header class="chat-stage-head">
+          <div>
+            <p class="eyebrow">聊天内容</p>
+            <h3>${esc(selected?.title || "未选择会话")}</h3>
+            <p class="muted">${esc(selected?.subtitle || "从左侧选择会话后，在这里查看消息流。")}</p>
+          </div>
+          <div class="chat-stage-meta">
+            <span class="channel-badge">${esc(selected?.channel || "desktop")}</span>
+            <button class="button button-ghost" id="refreshChatBtn">刷新</button>
+            ${readonly ? `<span class="pill">只读</span>` : `<button class="button button-ghost" id="clearChatBtn" ${state.chatBusy ? "disabled" : ""}>清空测试会话</button>`}
+          </div>
+        </header>
+        <div class="chat-feed-shell"><div class="chat-feed" id="chatFeed">${renderChatFeed()}</div></div>
+        <footer class="chat-compose">
+          <div class="compose-box ${readonly ? "readonly" : ""}">
+            <textarea id="chatInput" ${readonly ? "disabled" : ""} placeholder="${readonly ? "当前会话为只读视图" : "输入消息，Enter 发送，Shift + Enter 换行"}">${esc(state.chatDraft)}</textarea>
+            <button class="button button-primary send-button" id="sendChatBtn" ${readonly || state.chatBusy ? "disabled" : ""}>${state.chatBusy ? "发送中..." : "发送"}</button>
+          </div>
+        </footer>
       </section>
-    </div>
-  `;
-}
-function pageAi() {
-  const providers = state.bootstrap.schema.providers;
-  const current = providers.find((item) => item.key === state.provider) || providers[0];
-  const providerFields = current.fields || [];
-  const basicProviderFields = providerFields.filter((field) => field.key !== "extraHeaders");
-  const advancedProviderFields = providerFields.filter((field) => field.key === "extraHeaders");
-  const advancedAgentFields = state.bootstrap.schema.agents.filter((field) => !["provider", "model"].includes(field.key));
-  return `
-    <div class="page-grid">
-      <section class="panel stack">
-        <div>
-          <p class="eyebrow">Easy Setup</p>
-          <h3>AI 快速接入</h3>
-          <p class="muted">对大多数用户，只需要填三样：接口类型、模型名、Key。高级参数默认先别动。</p>
-        </div>
-        <div class="provider-chip-row">${providers.map((item) => `<button class="provider-chip ${item.key === current.key ? "active" : ""}" data-provider="${item.key}">${item.label}</button>`).join("")}</div>
-      </section>
-      <div class="split-panel">
-        <section class="panel stack">
-          <div><p class="eyebrow">Basic</p><h3>最小可用配置</h3><p class="field-hint">${esc(providerQuickHint(current.key))}</p></div>
-          <div class="form-grid">
-            ${renderFields(state.draft.agents.defaults, state.bootstrap.schema.agents.filter((field) => ["model"].includes(field.key)), "agents.defaults")}
-            ${renderFields(state.draft.providers[current.key] || {}, basicProviderFields, `providers.${current.key}`)}
-          </div>
-        </section>
-        <section class="panel stack">
-          <div><p class="eyebrow">How To Think</p><h3>填写建议</h3></div>
-          <div class="notice">如果你用的是自定义 OpenAI 兼容接口，模型名必须填写服务端真实支持的 model id，桌面端不会替你自动改名。</div>
-          <div class="table-note">当前 Provider：${esc(current.label)}</div>
-          <div class="table-note">典型输入：地址 / Key / 模型名</div>
-          <div class="table-note">推荐顺序：先用聊天窗口里的“桌面测试聊天”验证，再去 Telegram 实测。</div>
-        </section>
-      </div>
-      <details class="details-card">
-        <summary>高级参数（一般不用改）</summary>
-        <div class="stack"><div class="form-grid">
-          ${renderFields(state.draft.agents.defaults, advancedAgentFields, "agents.defaults")}
-          ${renderFields(state.draft.tools.web, state.bootstrap.schema.tools.web, "tools.web")}
-          ${renderFields(state.draft.tools.exec, state.bootstrap.schema.tools.exec, "tools.exec")}
-          ${renderFields(state.draft.tools, state.bootstrap.schema.tools.root, "tools")}
-          ${renderFields(state.draft.providers[current.key] || {}, advancedProviderFields, `providers.${current.key}`)}
-        </div></div>
-      </details>
-    </div>
-  `;
-}
-
-function pageChannels() {
-  return `
-    <div class="page-grid">
-      <section class="panel"><p class="eyebrow">Channels</p><h3>聊天渠道配置</h3><p class="muted">渠道卡片先保留完整配置；后面可以继续做每个渠道的“基础模式 / 高级模式”分层。</p></section>
-      <div class="channel-grid">${state.bootstrap.schema.channels.map((channel) => {
-        const cfg = state.draft.channels[channel.key] || clone(channel.defaultConfig);
-        return `<article class="channel-card"><div class="card-head"><div><p class="eyebrow">${channel.key}</p><h4>${channel.label}</h4></div><span class="pill">${cfg.enabled ? "已启用" : "未启用"}</span></div><div class="form-grid">${renderFields(cfg, channel.fields, `channels.${channel.key}`)}</div></article>`;
-      }).join("")}</div>
-    </div>
-  `;
-}
-
-function pageMcp() {
-  const servers = state.draft.tools.mcpServers || {};
-  const names = Object.keys(servers);
-  return `
-    <div class="page-grid">
-      <section class="panel"><div class="card-head"><div><p class="eyebrow">Model Context Protocol</p><h3>MCP Servers</h3></div><button class="button button-primary" id="addMcpBtn">新增 Server</button></div><p class="muted">这里暂时仍保持工程化视图，后续可以继续做一键模板。</p></section>
-      <div class="mcp-list">${names.length ? names.map((name) => mcpCard(name, servers[name])).join("") : `<div class="empty">还没有配置 MCP Server，可以先添加一个本地 filesystem 或远程 streamableHttp 服务。</div>`}</div>
     </div>
   `;
 }
 
 function pageSkills() {
-  const skills = state.bootstrap.skills;
-  return `
-    <div class="page-grid">
-      <section class="panel stack">
-        <div class="card-head"><div><p class="eyebrow">Skills Directory</p><h3>技能管理</h3></div><div class="button-row"><button class="button button-primary" id="createSkillBtn">新增 Skill</button><button class="button" data-open-target="skills">打开目录</button></div></div>
-        <div class="table-note">工作区：${esc(shortPath(skills.workspace))}</div>
-        <div class="table-note">自定义 skills 目录：${esc(shortPath(skills.skillsDirectory))}</div>
+  const items = state.bootstrap.skills.items || [];
+  const customCount = items.filter((item) => item.source === "workspace").length;
+  return pageFrame(`
+    <div class="page-stack page-stack-fill workspace-page">
+      <section class="workspace-hero">
+        <div class="workspace-hero-copy">
+          <p class="eyebrow">Skills</p>
+          <h3>技能库</h3>
+          <div class="workspace-chip-row">
+            <span class="workspace-chip strong">${items.length} 个技能</span>
+            <span class="workspace-chip">${customCount} 个自定义</span>
+          </div>
+        </div>
+        <div class="workspace-hero-side workspace-action-side">
+          <button class="button" data-open-target="skills">打开 Skills 目录</button>
+        </div>
       </section>
-      <div class="skills-grid">${skills.items.map((item) => `<article class="channel-card"><div class="card-head align-start"><div><p class="eyebrow">${esc(item.source)}</p><h4>${esc(item.name)}</h4></div>${item.editable ? `<button class="button button-small button-danger" data-delete-skill="${escAttr(item.name)}">删除</button>` : `<span class="pill">内置</span>`}</div><p class="muted">${esc(item.metadata.description || "无额外描述")}</p><div class="table-note">always: ${item.always ? "true" : "false"}</div><div class="table-note">${esc(shortPath(item.path))}</div></article>`).join("")}</div>
+      ${items.length ? `<section class="card-grid skill-grid-scroll catalog-grid-redesign">${items.map((item) => renderSkillCard(item)).join("")}</section>` : renderEmptyState("还没有 Skill", "先打开 Skills 目录放入技能", "打开 Skills 目录", "openSkillsEmptyBtn", "fill-empty-state")}
     </div>
-  `;
+  `);
 }
 
-function pageRuntime() {
-  const rotation = state.bootstrap.status.logRotation || { maxBytes: 0, maxArchives: 0 };
-  const archives = state.bootstrap.status.logArchives || [];
+function renderChannelCard(channel) {
+  const cfg = state.draft.channels[channel.key] || clone(channel.defaultConfig);
+  const fields = (channel.fields || []).filter((field) => field.key !== "enabled");
+  const expanded = Boolean(state.channelExpanded[channel.key]);
+  const configuredCount = fields.filter((field) => {
+    const value = getValue(cfg, field.key);
+    if (Array.isArray(value)) return value.length > 0;
+    return value !== null && value !== undefined && String(value).trim() !== "";
+  }).length;
+  if (channel.key === "weixin") return renderWeixinChannelCard(channel, cfg, fields, expanded, configuredCount);
   return `
-    <div class="page-grid">
-      <div class="split-panel">
-        <section class="panel stack">
-          <div><p class="eyebrow">Runtime</p><h3>Gateway 控制</h3><p class="muted">这里保留运维相关信息，避免和概览重复太多。</p></div>
-          <div class="button-row"><button class="button button-primary" data-gateway="start">启动</button><button class="button" data-gateway="restart">重启</button><button class="button button-danger" data-gateway="stop">停止</button></div>
-          <div class="table-note">状态：${state.bootstrap.status.running ? `运行中（PID ${state.bootstrap.status.pid}）` : "未运行"}</div>
-          <div class="table-note">最近退出码：${state.bootstrap.status.lastExitCode ?? "无"}</div>
-          <div class="table-note">日志轮转：单文件超过 ${Math.round(rotation.maxBytes / 1000)} KB 自动滚动，最多保留 ${rotation.maxArchives} 份旧文件</div>
-          <div class="table-note">历史日志：${archives.length ? archives.length : 0} 份</div>
-          <div class="button-row"><button class="button button-small" data-open-target="logs">打开日志目录</button><button class="button button-small" data-open-target="config">打开配置文件</button><button class="button button-small" data-open-target="workspace">打开工作区</button><button class="button button-small" id="copyLogsBtn">复制日志</button></div>
-        </section>
-        ${renderUpdaterPanel()}
+    <article class="channel-card channel-accordion ${cfg.enabled ? "" : "disabled"} ${expanded ? "open" : ""}">
+      <button class="channel-accordion-head" type="button" data-toggle-channel="${escAttr(channel.key)}" aria-expanded="${expanded ? "true" : "false"}">
+        <div class="channel-card-title">
+          <div class="channel-badge-large">${esc((channel.label || channel.key).slice(0, 2).toUpperCase())}</div>
+          <div><p class="eyebrow">${esc(channel.key)}</p><h4>${esc(channel.label)}</h4></div>
+        </div>
+        <div class="channel-accordion-meta">
+          <span class="channel-state">${cfg.enabled ? "已启用" : "未启用"}</span>
+          <span class="workspace-chip">${configuredCount}/${fields.length}</span>
+          <span class="channel-accordion-chevron" aria-hidden="true">⌄</span>
+        </div>
+      </button>
+      ${expanded ? `
+      <div class="channel-accordion-body">
+        <div class="channel-toggle-row">
+          <label class="field-card field-toggle">
+            <span class="field-label">启用渠道</span>
+            <span class="field-toggle-row"><input class="field-checkbox" type="checkbox" data-field-path="channels.${channel.key}.enabled" data-field-type="toggle" ${cfg.enabled ? "checked" : ""}><em class="field-toggle-state">${cfg.enabled ? "已开启" : "已关闭"}</em></span>
+          </label>
+        </div>
+        <div class="form-grid channel-form-grid">${renderFields(cfg, fields, `channels.${channel.key}`)}</div>
       </div>
-      <section class="panel stack"><div class="card-head align-start"><div><p class="eyebrow">Gateway Log</p><h3>最近输出</h3></div><button class="button button-small" id="refreshLogsBtn">刷新日志</button></div><pre class="pre compact" id="gatewayLogPre">${esc(logText())}</pre></section>
-    </div>
+      ` : ""}
+    </article>
   `;
 }
 
-function renderUpdaterPanel() {
-  const updater = state.updater;
-  const pending = updater.pending;
-  const checking = state.updaterBusy === "check";
-  const installing = state.updaterBusy === "install";
+function renderWeixinChannelCard(channel, cfg, fields, expanded, configuredCount) {
+  const plugin = state.bootstrap.weixin || {};
+  const sessions = state.sessions.filter((item) => item.channel === "weixin");
+  const login = state.weixinLogin;
+  const qrImage = login?.qrUrl ? qrImageUrl(login.qrUrl) : "";
   return `
-    <section class="panel updater-panel">
-      <p class="eyebrow">Updater</p>
-      <h3>自动更新</h3>
-      <div class="updater-meta-row"><span class="pill ${updater.configured ? "pill-ok" : "pill-warn"}">${updater.configured ? "已配置" : "待配置"}</span><span class="pill">通道 ${esc(updater.channel || "stable")}</span></div>
-      <div class="table-note">当前版本：${esc(updater.currentVersion || state.bootstrap.meta.desktopVersion)}</div>
-      <div class="table-note">更新源：${esc(updater.endpoint || "未配置")}</div>
-      ${pending ? `<div class="update-highlight"><strong>发现新版本 ${esc(pending.version)}</strong><p>${esc(pending.body || "GitHub Release 中存在新安装包，可执行安装。")}</p></div>` : `<div class="empty">${updater.configured ? "还没有检查到新版本。" : "先配置 updater 公钥，再发布签名过的 Release。"}</div>`}
-      <p class="muted">${esc(updater.note || "")}</p>
-      <div class="button-row"><button class="button button-primary" id="checkUpdatesBtn" ${checking || installing ? "disabled" : ""}>${checking ? "检查中..." : "检查更新"}</button><button class="button" id="installUpdateBtn" ${!pending || checking || installing ? "disabled" : ""}>${installing ? "安装中..." : "安装更新"}</button></div>
+    <article class="channel-card channel-accordion ${cfg.enabled ? "" : "disabled"} ${expanded ? "open" : ""}">
+      <button class="channel-accordion-head" type="button" data-toggle-channel="${escAttr(channel.key)}" aria-expanded="${expanded ? "true" : "false"}">
+        <div class="channel-card-title">
+          <div class="channel-badge-large">WX</div>
+          <div><p class="eyebrow">${esc(channel.key)}</p><h4>${esc(channel.label)}</h4></div>
+        </div>
+        <div class="channel-accordion-meta">
+          <span class="channel-state">${plugin.loggedIn ? "已登录" : plugin.apiRunning ? "待登录" : "未启动"}</span>
+          <span class="workspace-chip">${configuredCount}/${fields.length}</span>
+          <span class="channel-accordion-chevron" aria-hidden="true">⌄</span>
+        </div>
+      </button>
+      ${expanded ? `
+      <div class="channel-accordion-body">
+        <div class="channel-toggle-row">
+          <label class="field-card field-toggle runtime-toggle-card">
+            <span class="field-label">启用渠道</span>
+            <span class="field-toggle-row"><input class="field-checkbox" id="weixinEnabledToggle" type="checkbox" ${cfg.enabled ? "checked" : ""} ${state.weixinBusy ? "disabled" : ""}><em class="field-toggle-state">${cfg.enabled ? "已开启" : "已关闭"}</em></span>
+          </label>
+        </div>
+        <div class="weixin-status-grid">
+          <div class="status-chip-card"><span>渠道</span><strong>${cfg.enabled ? "已开启" : "已关闭"}</strong></div>
+          <div class="status-chip-card"><span>接口</span><strong>${plugin.apiRunning ? "运行中" : "未运行"}</strong></div>
+          <div class="status-chip-card"><span>登录</span><strong>${plugin.loggedIn ? "已登录" : "未登录"}</strong></div>
+          <div class="status-chip-card"><span>桥接</span><strong>${plugin.bridge?.running ? "运行中" : "已停止"}</strong></div>
+          <div class="status-chip-card"><span>会话</span><strong>${sessions.length}</strong></div>
+        </div>
+        <div class="weixin-action-row">
+          <button class="button button-primary" id="startWeixinLoginBtn" ${(!cfg.enabled || state.weixinBusy) ? "disabled" : ""}>扫码登录</button>
+          <button class="button" id="logoutWeixinBtn" ${(!plugin.loggedIn || state.weixinBusy) ? "disabled" : ""}>退出登录</button>
+        </div>
+        ${(login && login.qrUrl) ? `
+        <section class="weixin-login-panel">
+          <div class="weixin-login-copy">
+            <p class="eyebrow">微信扫码</p>
+            <h5>${esc(login.status === "scanned" ? "已扫码，等待手机确认" : login.status === "confirmed" ? "登录成功" : "请使用微信扫码")}</h5>
+            <p class="muted">${esc(login.status === "confirmed" ? "当前账号已写入插件状态。" : "二维码过期后重新点一次扫码登录即可。")}</p>
+            <div class="weixin-login-actions">
+              <button class="button button-ghost" id="copyWeixinQrBtn">复制二维码内容</button>
+            </div>
+          </div>
+          <div class="weixin-qr-wrap">
+            <img class="weixin-qr-image" src="${escAttr(qrImage)}" alt="微信登录二维码">
+          </div>
+        </section>
+        ` : ""}
+        ${plugin.note ? `<p class="muted">${esc(plugin.note)}</p>` : ""}
+        <div class="weixin-meta-list">
+          <div class="weixin-meta-item"><span>当前微信</span><strong title="${escAttr(plugin.account?.userId || "未登录")}">${esc(shortPath(plugin.account?.userId || "未登录"))}</strong></div>
+          <div class="weixin-meta-item"><span>上下文</span><strong>${esc(String(plugin.contextCount || 0))}</strong></div>
+        </div>
+      </div>
+      ` : ""}
+    </article>
+  `;
+}
+
+function renderMcpCard(name, server) {
+  const summary = server.url || server.command || "尚未填写连接信息";
+  const type = server.type || "stdio";
+  const toolCount = Array.isArray(server.enabledTools) ? server.enabledTools.length : (Array.isArray(server.enabled_tools) ? server.enabled_tools.length : 0);
+  return `
+    <article class="catalog-card catalog-card-redesign">
+      <div class="catalog-head">
+        <div class="catalog-title-block">
+          <div class="catalog-icon">MC</div>
+          <div><strong title="${escAttr(name)}">${esc(name)}</strong><small>${esc(type)}</small></div>
+        </div>
+        <span class="status-tag">${esc(type)}</span>
+      </div>
+      <p class="catalog-desc">${esc(summary)}</p>
+      <div class="catalog-meta mono-inline" title="${escAttr(summary)}">${esc(summary)}</div>
+      <div class="catalog-foot"><span class="catalog-count mono-inline">tools ${toolCount || "*"}</span><button class="button button-ghost" data-remove-mcp="${escAttr(name)}">移除</button></div>
+    </article>
+  `;
+}
+
+function renderSkillCard(item) {
+  const sourceLabel = item.source === "workspace" ? "自定义" : "内置";
+  return `
+    <article class="catalog-card catalog-card-redesign skill-card-redesign">
+      <div class="catalog-head">
+        <div class="catalog-title-block">
+          <div class="catalog-icon">${esc(item.name.slice(0, 2).toUpperCase())}</div>
+          <div><strong title="${escAttr(item.name)}">${esc(item.name)}</strong><small>${esc(sourceLabel)}</small></div>
+        </div>
+        <span class="status-tag ${item.source === "workspace" ? "running" : ""}">${esc(sourceLabel)}</span>
+      </div>
+      <p class="catalog-desc">${esc(item.metadata.description || "暂无描述")}</p>
+      <div class="catalog-meta mono-inline" title="${escAttr(item.path)}">${esc(item.path)}</div>
+      <div class="catalog-foot">${item.editable ? `<button class="button button-ghost" data-delete-skill="${escAttr(item.name)}">删除</button>` : `<span></span>`}<span class="catalog-count mono-inline">always ${item.always ? "true" : "false"}</span></div>
+    </article>
+  `;
+}
+
+function renderEmptyState(title, body, buttonLabel, buttonId, extraClass = "") {
+  return `
+    <section class="empty-state ${extraClass}">
+      <div class="empty-illustration">NB</div>
+      <h4>${esc(title)}</h4>
+      <p>${esc(body)}</p>
+      <button class="button button-primary" id="${buttonId}">${esc(buttonLabel)}</button>
     </section>
   `;
 }
 
+function pageFrame(inner) {
+  return `<div class="page-frame"><div class="page-scroll">${inner}</div></div>`;
+}
+
+function statCard(label, value, note) {
+  return `<article class="stat-card"><p class="eyebrow">${esc(label)}</p><strong>${esc(value)}</strong><p class="muted">${esc(note)}</p></article>`;
+}
+
+function settingRow(label, value, hint, trailing = "") {
+  return `<div class="setting-row"><div class="setting-copy"><strong>${esc(label)}</strong><p class="muted">${esc(hint)}</p></div><div class="setting-trailing"><span class="pill">${esc(value)}</span>${trailing}</div></div>`;
+}
+
+function resourceRow(label, path) {
+  return `<div class="resource-row"><span class="resource-label">${esc(label)}</span><span class="resource-path mono-inline" title="${escAttr(path)}">${esc(path)}</span></div>`;
+}
+
+function setActiveSession(sessionKey) {
+  if (!sessionKey || sessionKey === state.selectedSessionKey) return;
+  state.selectedSessionKey = sessionKey;
+  state.selectedSession = state.sessions.find((item) => item.key === sessionKey) || null;
+  state.selectedSessionItems = [];
+  state.chatStickBottom = true;
+  state.chatScrollTop = 0;
+  renderBody();
+  void (async () => {
+    await refreshSelectedSession();
+    renderBody();
+  })();
+}
+
+function toggleChannelExpanded(channelKey) {
+  state.channelExpanded[channelKey] = !state.channelExpanded[channelKey];
+  renderBody();
+}
+
+function gatewaySummaryLine() {
+  const status = state.bootstrap.status;
+  if (status.running) return `PID ${status.pid}`;
+  if (status.note) return status.note;
+  return "等待启动或手动唤起";
+}
+
+function gatewayStatusSummary() {
+  const status = state.bootstrap?.status;
+  if (!status) return "Gateway 未运行";
+  if (status.running) return `Gateway 运行中 · PID ${status.pid}`;
+  if (status.note) return `Gateway 未启动 · ${status.note}`;
+  return "Gateway 未运行";
+}
+
 function renderSessionList() {
-  if (!state.sessions.length) return `<div class="empty">暂时没有会话。</div>`;
+  if (!state.sessions.length) return `<div class="session-empty">还没有可显示的会话。</div>`;
   return state.sessions.map((item) => `
-    <button class="session-item ${item.key === state.selectedSessionKey ? "active" : ""}" data-session-key="${escAttr(item.key)}">
-      <strong>${esc(item.title)}</strong>
-      <span>${esc(item.subtitle || "")}</span>
-      <small>${esc(formatUpdatedAt(item.updatedAt))}</small>
+    <button class="session-card ${item.key === state.selectedSessionKey ? "active" : ""}" data-session-key="${escAttr(item.key)}">
+      <span class="session-accent"></span>
+      <div class="session-badge">${esc((item.channel || "lo").slice(0, 2).toUpperCase())}</div>
+      <div class="session-copy"><strong>${esc(item.title)}</strong><p>${esc(item.subtitle || "暂无摘要")}</p><small>${esc(formatUpdatedAt(item.updatedAt))}</small></div>
     </button>
   `).join("");
 }
 
 function renderChatFeed() {
-  if (!state.selectedSessionItems.length) return `<div class="empty">当前会话还没有消息。</div>`;
-  return state.selectedSessionItems.map((item) => `
-    <article class="message-bubble ${escAttr(item.role || "assistant")}">
-      <div class="message-meta"><span>${esc(roleLabel(item.role, item.name))}</span><span>${esc(shortTimestamp(item.timestamp))}</span></div>
-      <div class="message-content">${renderMessageContent(item.content || "")}</div>
-    </article>
-  `).join("");
+  if (!state.selectedSessionItems.length) {
+    return `<div class="chat-empty"><div class="empty-illustration small">...</div><h4>当前会话还没有消息</h4><p>从左侧选择一个会话，或使用桌面测试会话发送消息。</p></div>`;
+  }
+  return state.selectedSessionItems.map((item) => {
+    const userSide = item.role === "user";
+    return `
+      <article class="bubble-row ${userSide ? "user" : "assistant"}">
+        <div class="bubble-meta"><span>${esc(roleLabel(item.role, item.name))}</span><span>${esc(shortTimestamp(item.timestamp))}</span></div>
+        <div class="bubble">${renderMessageContent(item.content || "")}</div>
+      </article>
+    `;
+  }).join("");
 }
-function mcpCard(name, server) {
-  return `
-    <article class="mcp-card">
-      <div class="card-head"><div><p class="eyebrow">MCP Server</p><h4>${esc(name)}</h4></div><button class="button button-danger" data-remove-mcp="${escAttr(name)}">移除</button></div>
-      <div class="form-grid">
-        ${fieldHtml(`mcp.${name}.name`, "名称", name, { readonly: true })}
-        ${selectHtml(`mcp.${name}.type`, "类型", server.type || "stdio", [{ label: "stdio", value: "stdio" }, { label: "sse", value: "sse" }, { label: "streamableHttp", value: "streamableHttp" }])}
-        ${fieldHtml(`mcp.${name}.command`, "命令", server.command || "", {})}
-        ${fieldHtml(`mcp.${name}.url`, "URL", server.url || "", {})}
-        ${textAreaHtml(`mcp.${name}.args`, "参数", (server.args || []).join("\n"), { parser: "list", help: "每行一个参数" })}
-        ${textAreaHtml(`mcp.${name}.enabledTools`, "启用工具", (server.enabledTools || []).join("\n"), { parser: "list", help: "每行一个；默认填 *" })}
-        ${textAreaHtml(`mcp.${name}.headers`, "Headers", asJson(server.headers || {}), { parser: "json", help: "JSON 对象" })}
-        ${textAreaHtml(`mcp.${name}.env`, "环境变量", asJson(server.env || {}), { parser: "json", help: "JSON 对象" })}
-        ${fieldHtml(`mcp.${name}.toolTimeout`, "工具超时（秒）", server.toolTimeout ?? 30, { type: "number" })}
-      </div>
-    </article>
-  `;
+
+function renderFields(source, fields, basePath) {
+  return (fields || []).map((field) => renderField(source, field, basePath)).join("");
+}
+
+function renderFieldLegacy(source, field, basePath) {
+  const path = `${basePath}.${field.key}`;
+  const value = getValue(source, field.key);
+  const label = field.label || field.key;
+  const help = field.help ? `<div class="field-help">${esc(field.help)}</div>` : "";
+  if (field.type === "toggle") {
+    return `<label class="field-card field-toggle"><span class="field-label">${esc(label)}</span><span class="field-toggle-row"><input type="checkbox" data-field-path="${escAttr(path)}" data-field-type="toggle" ${value ? "checked" : ""}><em>${value ? "已开启" : "已关闭"}</em></span>${help}</label>`;
+  }
+  if (field.type === "select" || field.type === "select-provider") {
+    const options = field.type === "select-provider" ? (state.bootstrap.schema.providers || []).map((item) => ({ label: item.label, value: item.key })) : (field.options || []);
+    return `<label class="field-card"><span class="field-label">${esc(label)}</span><select data-field-path="${escAttr(path)}" data-field-type="text">${options.map((option) => `<option value="${escAttr(String(option.value))}" ${String(option.value) === String(value ?? "") ? "selected" : ""}>${esc(option.label)}</option>`).join("")}</select>${help}</label>`;
+  }
+  if (field.type === "textarea" || field.type === "list" || field.type === "json") {
+    const parser = field.type === "list" ? "list" : (field.type === "json" ? "json" : "");
+    const textareaValue = field.type === "list" ? (Array.isArray(value) ? value.join("\n") : "") : field.type === "json" ? asJson(value) : String(value ?? "");
+    return `<label class="field-card"><span class="field-label">${esc(label)}</span><textarea data-field-path="${escAttr(path)}" data-field-type="text" ${parser ? `data-parser="${parser}"` : ""} placeholder="${escAttr(field.placeholder || "")}">${esc(textareaValue)}</textarea>${help}</label>`;
+  }
+  const inputType = field.type === "password" ? "password" : field.type === "number" ? "number" : "text";
+  return `<label class="field-card"><span class="field-label">${esc(label)}</span><input type="${inputType}" data-field-path="${escAttr(path)}" data-field-type="${field.type === "number" ? "number" : "text"}" value="${escAttr(value == null ? "" : String(value))}" placeholder="${escAttr(field.placeholder || "")}" ${field.step != null ? `step="${escAttr(String(field.step))}"` : ""}>${help}</label>`;
+}
+
+function renderField(source, field, basePath) {
+  const path = `${basePath}.${field.key}`;
+  const value = getValue(source, field.key);
+  const label = field.label || field.key;
+  const help = field.help ? `<div class="field-help">${esc(field.help)}</div>` : "";
+  if (field.type === "toggle") {
+    return `<label class="field-card field-toggle"><span class="field-label">${esc(label)}</span><span class="field-toggle-row"><input class="field-checkbox" type="checkbox" data-field-path="${escAttr(path)}" data-field-type="toggle" ${value ? "checked" : ""}><em class="field-toggle-state">${value ? "已开启" : "已关闭"}</em></span>${help}</label>`;
+  }
+  if (field.type === "select" || field.type === "select-provider") {
+    const options = field.type === "select-provider"
+      ? (state.bootstrap.schema.providers || []).map((item) => ({ label: providerDisplayName(item.key, item.label), value: item.key }))
+      : (field.options || []);
+    return `<label class="field-card"><span class="field-label">${esc(label)}</span><select data-field-path="${escAttr(path)}" data-field-type="text">${options.map((option) => `<option value="${escAttr(String(option.value))}" ${String(option.value) === String(value ?? "") ? "selected" : ""}>${esc(option.label)}</option>`).join("")}</select>${help}</label>`;
+  }
+  if (field.type === "textarea" || field.type === "list" || field.type === "json") {
+    const parser = field.type === "list" ? "list" : (field.type === "json" ? "json" : "");
+    const textareaValue = field.type === "list" ? (Array.isArray(value) ? value.join("\n") : "") : field.type === "json" ? asJson(value) : String(value ?? "");
+    return `<label class="field-card"><span class="field-label">${esc(label)}</span><textarea data-field-path="${escAttr(path)}" data-field-type="text" ${parser ? `data-parser="${parser}"` : ""} placeholder="${escAttr(field.placeholder || "")}">${esc(textareaValue)}</textarea>${help}</label>`;
+  }
+  const inputType = field.type === "password" ? "password" : field.type === "number" ? "number" : "text";
+  return `<label class="field-card"><span class="field-label">${esc(label)}</span><input type="${inputType}" data-field-path="${escAttr(path)}" data-field-type="${field.type === "number" ? "number" : "text"}" value="${escAttr(value == null ? "" : String(value))}" placeholder="${escAttr(field.placeholder || "")}" ${field.step != null ? `step="${escAttr(String(field.step))}"` : ""}>${help}</label>`;
 }
 
 function bindPage() {
-  for (const button of document.querySelectorAll("[data-gateway]")) button.onclick = () => gatewayAction(button.dataset.gateway);
+  for (const button of document.querySelectorAll("[data-switch-tab]")) button.onclick = () => setTab(button.dataset.switchTab);
+  for (const button of document.querySelectorAll("[data-toggle-channel]")) button.onclick = () => toggleChannelExpanded(button.dataset.toggleChannel);
   for (const button of document.querySelectorAll("[data-provider]")) button.onclick = () => { state.provider = button.dataset.provider; applyValue("agents.defaults.provider", state.provider); render(); };
+  for (const button of document.querySelectorAll("[data-session-key]")) button.onclick = () => setActiveSession(button.dataset.sessionKey);
   for (const button of document.querySelectorAll("[data-open-target]")) button.onclick = () => openTarget(button.dataset.openTarget);
-  for (const button of document.querySelectorAll("[data-switch-tab]")) button.onclick = () => {
-    state.tab = button.dataset.switchTab;
-    if (state.tab === "chat") {
-      state.chatStickBottom = true;
-      state.chatScrollTop = 0;
-      refreshSelectedSession(true);
-      return;
-    }
-    render();
-  };
-  for (const button of document.querySelectorAll("[data-session-key]")) button.onclick = async () => {
-    state.selectedSessionKey = button.dataset.sessionKey;
-    state.chatStickBottom = true;
-    state.chatScrollTop = 0;
-    await refreshSelectedSession(true);
-  };
+  for (const button of document.querySelectorAll("[data-gateway]")) button.onclick = () => gatewayAction(button.dataset.gateway);
   for (const button of document.querySelectorAll("[data-delete-skill]")) button.onclick = () => deleteSkill(button.dataset.deleteSkill);
   for (const button of document.querySelectorAll("[data-remove-mcp]")) button.onclick = () => { delete (state.draft.tools.mcpServers || {})[button.dataset.removeMcp]; state.restartRecommended = true; render(); };
-  document.getElementById("refreshLogsBtn")?.addEventListener("click", async () => { captureLogScroll(); await refreshLogs(); renderBody(); });
-  document.getElementById("copyLogsBtn")?.addEventListener("click", copyLogs);
-  document.getElementById("checkUpdatesBtn")?.addEventListener("click", checkUpdates);
-  document.getElementById("installUpdateBtn")?.addEventListener("click", installUpdate);
+
+  document.getElementById("refreshChatBtn")?.addEventListener("click", async () => { await refreshChatData(); });
+  document.getElementById("sendChatBtn")?.addEventListener("click", sendChatMessage);
+  document.getElementById("clearChatBtn")?.addEventListener("click", clearChatHistory);
+  document.getElementById("createSkillBtn")?.addEventListener("click", createSkill);
+  document.getElementById("openSkillsEmptyBtn")?.addEventListener("click", () => openTarget("skills"));
   document.getElementById("addMcpBtn")?.addEventListener("click", () => {
     const name = window.prompt("请输入 MCP Server 名称");
     if (!name) return;
@@ -700,9 +1381,24 @@ function bindPage() {
     state.restartRecommended = true;
     render();
   });
-  document.getElementById("createSkillBtn")?.addEventListener("click", createSkill);
-  document.getElementById("sendChatBtn")?.addEventListener("click", sendChatMessage);
-  document.getElementById("clearChatBtn")?.addEventListener("click", clearChatHistory);
+
+  document.getElementById("toggleAutoLaunchBtn")?.addEventListener("click", () => setAutoLaunch(!state.autoLaunchEnabled));
+  document.getElementById("toggleOverviewAutoLaunchBtn")?.addEventListener("click", () => setAutoLaunch(!state.autoLaunchEnabled));
+  document.getElementById("refreshDesktopStateBtn")?.addEventListener("click", async () => { await refreshUpdaterState(false); await refreshAutoLaunchState(false); renderBody(); });
+  document.getElementById("refreshDashboardStateBtn")?.addEventListener("click", async () => { await refreshUpdaterState(false); await refreshAutoLaunchState(false); await refreshRuntime(); renderBody(); });
+  document.getElementById("refreshOverviewDesktopStateBtn")?.addEventListener("click", async () => { await refreshUpdaterState(false); await refreshAutoLaunchState(false); renderBody(); });
+  document.getElementById("checkUpdatesBtn")?.addEventListener("click", checkUpdates);
+  document.getElementById("installUpdateBtn")?.addEventListener("click", installUpdate);
+  document.getElementById("refreshLogsBtn")?.addEventListener("click", async () => { captureLogScroll(); await refreshLogs(); renderBody(); });
+  document.getElementById("clearLogsBtn")?.addEventListener("click", clearLogView);
+  document.getElementById("copyLogsBtn")?.addEventListener("click", copyLogs);
+  document.getElementById("toggleAiAdvancedBtn")?.addEventListener("click", toggleAiAdvancedPanel);
+  document.getElementById("startWeixinLoginBtn")?.addEventListener("click", () => weixinAction("startLogin"));
+  document.getElementById("logoutWeixinBtn")?.addEventListener("click", () => weixinAction("logout"));
+  document.getElementById("copyWeixinQrBtn")?.addEventListener("click", () => copyText(state.weixinLogin?.qrUrl || ""));
+  document.getElementById("weixinEnabledToggle")?.addEventListener("change", (event) => {
+    void syncWeixinEnabled(event.target.checked);
+  });
 
   const chatInput = document.getElementById("chatInput");
   if (chatInput) {
@@ -715,102 +1411,269 @@ function bindPage() {
     });
   }
 
-  const gatewayLogPre = document.getElementById("gatewayLogPre");
-  if (gatewayLogPre) gatewayLogPre.addEventListener("scroll", captureLogScroll);
-  const chatFeed = document.getElementById("chatFeed");
-  if (chatFeed) chatFeed.addEventListener("scroll", captureChatScroll);
+  document.getElementById("gatewayLogPre")?.addEventListener("scroll", captureLogScroll);
+  document.getElementById("chatFeed")?.addEventListener("scroll", captureChatScroll);
 
   for (const input of document.querySelectorAll("[data-field-path]")) {
-    input.onchange = () => {
-      const type = input.dataset.fieldType;
-      const parser = input.dataset.parser;
-      let value = input.value;
+    const commitValue = () => {
+      let value;
+      const type = input.dataset.fieldType || "text";
+      const parser = input.dataset.parser || "";
       if (type === "toggle") value = input.checked;
-      if (type === "number") value = value === "" ? 0 : Number(value);
-      if (parser === "list") value = value.split(/\r?\n|,/).map((part) => part.trim()).filter(Boolean);
+      else if (type === "number") value = input.value === "" ? 0 : Number(input.value);
+      else value = input.value;
+      if (parser === "list") value = String(value).split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean);
       if (parser === "json") {
-        try { value = value.trim() ? JSON.parse(value) : {}; }
-        catch (error) { window.alert(`JSON 格式错误：${error.message}`); input.focus(); return; }
+        try {
+          value = String(value).trim() ? JSON.parse(String(value)) : {};
+        } catch (error) {
+          window.alert(`JSON 格式错误：${error.message}`);
+          input.focus();
+          return;
+        }
       }
       applyValue(input.dataset.fieldPath, value);
+      if (state.tab === "ai" && input.dataset.fieldPath === "agents.defaults.provider") state.provider = value;
+      if (state.tab === "ai" && input.dataset.fieldPath === "agents.defaults.provider") {
+        render();
+        return;
+      }
+      if (String(input.dataset.fieldPath || "").startsWith("channels.") || String(input.dataset.fieldPath || "").startsWith("desktop.")) renderBody();
       renderHeader();
     };
+    input.addEventListener("change", commitValue);
+    if (input.tagName !== "TEXTAREA" || !input.dataset.parser) input.addEventListener("input", commitValue);
   }
 }
 
-function renderFields(target, fields, base) {
-  return fields.map((field) => {
-    const value = getPath(target, field.key);
-    const path = `${base}.${field.key}`;
-    if (field.type === "toggle") return toggleHtml(path, field.label, Boolean(value));
-    if (field.type === "select-provider") return selectHtml(path, field.label, value, state.bootstrap.schema.providers.map((item) => ({ label: item.label, value: item.key })));
-    if (field.type === "select") return selectHtml(path, field.label, value, field.options || []);
-    if (field.type === "textarea") return textAreaHtml(path, field.label, value ?? "", field);
-    if (field.type === "list") return textAreaHtml(path, field.label, (value || []).join("\n"), { ...field, parser: "list" });
-    if (field.type === "json") return textAreaHtml(path, field.label, asJson(value || {}), { ...field, parser: "json" });
-    return fieldHtml(path, field.label, value ?? "", field);
-  }).join("");
+function toggleAiAdvancedPanel(force) {
+  state.aiAdvancedOpen = typeof force === "boolean" ? force : !state.aiAdvancedOpen;
+  const button = document.getElementById("toggleAiAdvancedBtn");
+  const content = document.getElementById("aiAdvancedContent");
+  button?.classList.toggle("open", state.aiAdvancedOpen);
+  button?.setAttribute("aria-expanded", state.aiAdvancedOpen ? "true" : "false");
+  content?.classList.toggle("open", state.aiAdvancedOpen);
 }
 
-function toggleHtml(path, label, checked) { return `<div class="field"><label>${label}</label><label class="toggle"><input type="checkbox" data-field-path="${path}" data-field-type="toggle" ${checked ? "checked" : ""}><span>${checked ? "已开启" : "已关闭"}</span></label></div>`; }
-function fieldHtml(path, label, value, field) { const type = field.type === "number" ? "number" : field.type === "password" ? "password" : "text"; return `<div class="field ${field.full ? "full" : ""}"><label>${label}</label>${help(field)}<input type="${type}" value="${escAttr(String(value ?? ""))}" data-field-path="${path}" data-field-type="${field.type === "number" ? "number" : "text"}" placeholder="${escAttr(field.placeholder || "")}" ${field.readonly ? "readonly" : ""}></div>`; }
-function textAreaHtml(path, label, value, field) { return `<div class="field full"><label>${label}</label>${help(field)}<textarea data-field-path="${path}" data-field-type="textarea" data-parser="${field.parser || ""}" placeholder="${escAttr(field.placeholder || "")}" ${field.readonly ? "readonly" : ""}>${esc(String(value ?? ""))}</textarea></div>`; }
-function selectHtml(path, label, value, options) { return `<div class="field"><label>${label}</label><select data-field-path="${path}" data-field-type="select">${options.map((option) => `<option value="${escAttr(option.value)}" ${String(option.value) === String(value) ? "selected" : ""}>${esc(option.label)}</option>`).join("")}</select></div>`; }
-function help(field) { return field.help ? `<span class="field-help">${esc(field.help)}</span>` : ""; }
-function enabledChannels() { return state.bootstrap.schema.channels.filter((item) => state.draft.channels?.[item.key]?.enabled).map((item) => item.key); }
-function logText() { return state.logs.length ? state.logs.join("\n") : "暂无日志输出"; }
-function fallbackUpdaterState(note, supported = true) { return { supported, configured: false, channel: "stable", endpoint: "https://github.com/hw7622/nanobot-desktop/releases/latest/download/latest.json", pubkeyConfigured: false, currentVersion: "0.1.0", pending: null, note }; }
-function getPath(target, path) { return path.split(".").reduce((acc, key) => (acc == null ? undefined : acc[key]), target); }
-function applyValue(path, value) { const parts = path.split("."); if (parts[0] === "mcp") { state.draft.tools.mcpServers ||= {}; const [, name, ...rest] = parts; setPath(state.draft.tools.mcpServers[name], rest, value); state.restartRecommended = true; return; } setPath(state.draft, parts, value); state.restartRecommended = true; }
-function setPath(target, parts, value) { let cursor = target; for (let index = 0; index < parts.length - 1; index += 1) { const key = parts[index]; if (cursor[key] == null || typeof cursor[key] !== "object") cursor[key] = {}; cursor = cursor[key]; } cursor[parts[parts.length - 1]] = value; }
-function isDirty() { return state.bootstrap && state.draft && JSON.stringify(state.bootstrap.config) !== JSON.stringify(state.draft); }
-async function fetchJson(url, init) { const response = await fetch(`${API_BASE}${url}`, init); const raw = await response.text(); let payload = {}; try { payload = raw ? JSON.parse(raw) : {}; } catch { if (!response.ok) throw new Error(`Request failed: ${response.status}`); throw new Error(raw || "响应不是有效 JSON"); } if (!response.ok) throw new Error(payload.error || `Request failed: ${response.status}`); return payload; }
-async function invokeTauri(command, args) { if (!TAURI_INVOKE) throw new Error("当前不在桌面安装版环境中"); return TAURI_INVOKE(command, args); }
-function clone(value) { return JSON.parse(JSON.stringify(value)); }
-function asJson(value) { return JSON.stringify(value, null, 2); }
-function providerQuickHint(provider) { const hints = { custom: "只填接口地址、API Key 和模型名即可。非常适合 OpenAI 兼容中转或本地代理。", openrouter: "一般只需要 API Key 和模型名。模型名常见形如 anthropic/claude-3.7-sonnet。", ollama: "本地模型通常只填 API Base 和模型名，例如 http://localhost:11434 + qwen2.5:7b。" }; return hints[provider] || "建议先只填模型名和 Key，其他项保持默认。"; }
-function roleLabel(role, name) { if (role === "user") return "你"; if (role === "assistant") return "Nanobot"; if (role === "tool") return `工具${name ? ` · ${name}` : ""}`; if (role === "system") return "系统"; return role || "消息"; }
-function shortTimestamp(value) { if (!value) return ""; const date = new Date(value); if (Number.isNaN(date.getTime())) return value; return date.toLocaleString("zh-CN", { hour12: false }); }
-function shortPath(value) { const text = String(value || ""); if (text.length <= 40) return text; return `...${text.slice(-37)}`; }
-function formatUpdatedAt(value) { return value ? `更新于 ${shortTimestamp(value)}` : "尚无消息"; }
-function captureLogScroll() { const el = document.getElementById("gatewayLogPre"); if (!el) return; state.logScrollTop = el.scrollTop; const distance = el.scrollHeight - el.clientHeight - el.scrollTop; state.logStickBottom = distance < 24; }
-function restoreLogScroll() { const el = document.getElementById("gatewayLogPre"); if (!el) return; requestAnimationFrame(() => { el.scrollTop = state.logStickBottom ? el.scrollHeight : state.logScrollTop; }); }
-function captureChatScroll() { const el = document.getElementById("chatFeed"); if (!el) return; state.chatScrollTop = el.scrollTop; const distance = el.scrollHeight - el.clientHeight - el.scrollTop; state.chatStickBottom = distance < 24; }
-function restoreChatScroll() { const el = document.getElementById("chatFeed"); if (!el) return; requestAnimationFrame(() => { el.scrollTop = state.chatStickBottom ? el.scrollHeight : state.chatScrollTop; }); }
-function renderMessageContent(value) {
+function captureLogScroll() {
+  const node = document.getElementById("gatewayLogPre");
+  if (!node) return;
+  state.logScrollTop = node.scrollTop;
+  state.logStickBottom = node.scrollTop + node.clientHeight >= node.scrollHeight - 20;
+}
+
+function getPageScrollNode() {
+  return els.content.querySelector(".page-scroll");
+}
+
+function capturePageScroll() {
+  const node = getPageScrollNode();
+  if (!node) return;
+  const key = els.content.dataset.tab || state.tab;
+  state.pageScrollTops[key] = node.scrollTop;
+}
+
+function restorePageScroll() {
+  const node = getPageScrollNode();
+  if (!node) return;
+  const key = state.tab;
+  node.scrollTop = state.pageScrollTops[key] || 0;
+}
+
+function restoreLogScroll() {
+  const node = document.getElementById("gatewayLogPre");
+  if (!node) return;
+  if (state.logStickBottom) node.scrollTop = node.scrollHeight;
+  else node.scrollTop = state.logScrollTop;
+}
+
+function captureChatScroll() {
+  const node = document.getElementById("chatFeed");
+  if (!node) return;
+  state.chatScrollTop = node.scrollTop;
+  state.chatStickBottom = node.scrollTop + node.clientHeight >= node.scrollHeight - 20;
+}
+
+function restoreChatScroll() {
+  const node = document.getElementById("chatFeed");
+  if (!node) return;
+  if (state.chatStickBottom) node.scrollTop = node.scrollHeight;
+  else node.scrollTop = state.chatScrollTop;
+}
+
+function currentRefreshIntervalMs() {
+  if (!state.draft) return 3000;
+  const seconds = Number(ensureDesktopConfig(state.draft).chat.refreshIntervalSeconds || 3);
+  return Math.max(1, seconds) * 1000;
+}
+
+function ensureDesktopConfig(target) {
+  target.desktop ||= {};
+  target.desktop.gateway ||= {};
+  target.desktop.app ||= {};
+  target.desktop.chat ||= {};
+  if (target.desktop.gateway.autoStart == null) target.desktop.gateway.autoStart = true;
+  if (target.desktop.app.autoLaunch == null) target.desktop.app.autoLaunch = false;
+  if (target.desktop.chat.refreshIntervalSeconds == null) target.desktop.chat.refreshIntervalSeconds = 3;
+  return target.desktop;
+}
+
+function enabledChannels() {
+  const channels = state.draft?.channels || {};
+  return Object.entries(channels).filter(([, value]) => typeof value === "object" && value && value.enabled).map(([key]) => key);
+}
+
+function roleLabel(role, name) {
+  if (name) return `${role || "assistant"} · ${name}`;
+  if (role === "user") return "User";
+  if (role === "assistant") return "Nanobot";
+  if (role === "system") return "System";
+  return role || "assistant";
+}
+
+function formatUpdatedAt(value) {
+  if (!value) return "刚刚";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "未知时间";
+  return date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+function shortTimestamp(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+}
+
+function shortPath(value) {
   const text = String(value || "");
-  if (!text.trim()) return `<span class="muted">空消息</span>`;
-  const chunks = [];
-  const blockPattern = /```([\s\S]*?)```/g;
-  let lastIndex = 0;
-  let match;
-  while ((match = blockPattern.exec(text))) {
-    if (match.index > lastIndex) chunks.push(renderInlineMessage(text.slice(lastIndex, match.index)));
-    chunks.push(`<pre class="inline-pre"><code>${esc(match[1].trim())}</code></pre>`);
-    lastIndex = blockPattern.lastIndex;
-  }
-  if (lastIndex < text.length) chunks.push(renderInlineMessage(text.slice(lastIndex)));
-  return chunks.join("") || `<span class="muted">空消息</span>`;
+  return text.length > 64 ? `...${text.slice(-61)}` : text;
 }
-function renderInlineMessage(text) {
+
+function providerQuickHintLegacy(key) {
+  const hints = {
+    custom: "Custom 兼容接口通常需要同时填写 API Base 与 API Key。",
+    openrouter: "OpenRouter 常见组合是 provider 选 openrouter，模型填写完整上游模型名。",
+    ollama: "Ollama 本地模型通常只需要 API Base，例如 http://localhost:11434。",
+    dashscope: "DashScope / Qwen 通常需要 API Key，必要时补充 API Base。",
+  };
+  return hints[key] || "优先保证 Provider、模型名与 Key 三项对应正确。";
+}
+
+function providerQuickHint(key) {
+  const hints = {
+    custom: "自定义兼容接口通常需要同时填写 API Base、API Key，额外请求头放到高级参数里。",
+    openrouter: "OpenRouter 常见组合是供应商选 OpenRouter，模型填写完整的上游模型名。",
+    ollama: "Ollama 本地模型通常只需要 API Base，例如 http://localhost:11434。",
+    dashscope: "通义千问通常需要 API Key；如果你走企业网关，再补充 API Base。",
+  };
+  return hints[key] || "优先保证供应商、默认模型和 API Key 这三项对应正确。";
+}
+
+function providerDisplayName(key, fallback) {
+  const names = {
+    openrouter: "OpenRouter",
+    anthropic: "Anthropic",
+    openai: "OpenAI",
+    deepseek: "DeepSeek",
+    dashscope: "通义千问",
+    gemini: "Gemini",
+    moonshot: "Kimi",
+    zhipu: "智谱 GLM",
+    ollama: "Ollama",
+    custom: "自定义兼容接口",
+  };
+  return names[key] || fallback || key;
+}
+
+function logText() {
+  return state.logs.length ? state.logs.join("\n") : "暂无日志输出。";
+}
+
+function isDirty() {
+  if (!state.bootstrap || !state.draft) return false;
+  return JSON.stringify(state.draft) !== JSON.stringify(state.bootstrap.config);
+}
+
+function getValue(source, keyPath) {
+  return keyPath.split(".").reduce((current, segment) => (current == null ? undefined : current[segment]), source);
+}
+
+function applyValue(path, value) {
+  const parts = path.split(".");
+  let cursor = state.draft;
+  for (let index = 0; index < parts.length - 1; index += 1) {
+    const part = parts[index];
+    if (cursor[part] == null || typeof cursor[part] !== "object") cursor[part] = {};
+    cursor = cursor[part];
+  }
+  cursor[parts[parts.length - 1]] = value;
+}
+
+function renderMessageContent(text) {
   const tokens = [];
   const pushToken = (html) => {
     const token = `__HTML_TOKEN_${tokens.length}__`;
     tokens.push(html);
     return token;
   };
-  let html = esc(text);
+  let html = esc(String(text || ""));
   html = html.replace(/!\[([^\]]*)\]\((https?:\/\/[^\s)]+)\)/g, (_, alt, url) => pushToken(imageHtml(url, alt || "图片")));
   html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (_, label, url) => pushToken(linkHtml(url, label)));
-  html = html.replace(/(^|[\s(])((https?:\/\/[^\s<]+?\.(?:png|jpe?g|gif|webp))(?:\?[^\s<]*)?)/gim, (_, prefix, url) => `${prefix}${pushToken(imageHtml(url, "图片"))}`);
   html = html.replace(/(^|[\s(])(https?:\/\/[^\s<]+)/gim, (_, prefix, url) => `${prefix}${pushToken(linkHtml(url, url))}`);
   html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
   html = html.replace(/\n/g, "<br>");
-  return tokens.reduce((acc, tokenHtml, index) => acc.replaceAll(`__HTML_TOKEN_${index}__`, tokenHtml), html);
+  return tokens.reduce((output, tokenHtml, index) => output.replaceAll(`__HTML_TOKEN_${index}__`, tokenHtml), html);
 }
-function imageHtml(url, alt) { return `<figure class="inline-image"><img src="${escAttr(url)}" alt="${escAttr(alt)}" loading="lazy"><figcaption>${esc(alt)}</figcaption></figure>`; }
-function linkHtml(url, label) { return `<a class="message-link" href="${escAttr(url)}" target="_blank" rel="noreferrer">${esc(label)}</a>`; }
-function esc(value) { return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;"); }
-function escAttr(value) { return esc(value).replaceAll("'", "&#39;"); }
-function sleep(ms) { return new Promise((resolve) => window.setTimeout(resolve, ms)); }
+
+function imageHtml(url, alt) {
+  return `<figure class="inline-image"><img src="${escAttr(url)}" alt="${escAttr(alt)}" loading="lazy"><figcaption>${esc(alt)}</figcaption></figure>`;
+}
+
+function linkHtml(url, label) {
+  return `<a class="message-link" href="${escAttr(url)}" target="_blank" rel="noreferrer">${esc(label)}</a>`;
+}
+
+function asJson(value) {
+  if (value == null || value === "") return "";
+  try { return JSON.stringify(value, null, 2); } catch { return ""; }
+}
+
+function clone(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function fallbackUpdaterState(note) {
+  return { supported: Boolean(TAURI_INVOKE), configured: false, currentVersion: "", pending: null, channel: "stable", endpoint: "", note };
+}
+
+async function invokeTauri(command, args = {}) {
+  if (!TAURI_INVOKE) throw new Error("Tauri API unavailable");
+  return TAURI_INVOKE(command, args);
+}
+
+async function fetchJson(url, init) {
+  const response = await fetch(`${API_BASE}${url}`, init);
+  const raw = await response.text();
+  let payload = {};
+  try { payload = raw ? JSON.parse(raw) : {}; }
+  catch {
+    if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+    throw new Error(raw || "响应不是有效 JSON");
+  }
+  if (!response.ok) throw new Error(payload.error || `Request failed: ${response.status}`);
+  return payload;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function esc(value) {
+  return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+}
+
+function escAttr(value) {
+  return esc(value).replaceAll("'", "&#39;");
+}
