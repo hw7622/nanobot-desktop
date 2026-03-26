@@ -8,11 +8,6 @@ ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "desktop" / "dist"
 BUILD = ROOT / "desktop" / "build"
 
-try:
-    import litellm
-except Exception:
-    litellm = None
-
 hidden_imports = [
     "nanobot.channels.telegram",
     "nanobot.channels.feishu",
@@ -20,9 +15,9 @@ hidden_imports = [
     "nanobot.channels.email",
     "nanobot.channels.qq",
     "nanobot.channels.wecom",
-    "nanobot.providers.litellm_provider",
-    "nanobot.providers.custom_provider",
+    "nanobot.providers.anthropic_provider",
     "nanobot.providers.azure_openai_provider",
+    "nanobot.providers.openai_compat_provider",
     "nanobot.providers.openai_codex_provider",
 ]
 
@@ -52,11 +47,6 @@ command = [
     "--collect-data",
     "tiktoken",
 ]
-
-if litellm is not None:
-    litellm_dir = Path(litellm.__file__).resolve().parent
-    for json_file in sorted(litellm_dir.glob("*.json")):
-        command.extend(["--add-data", f"{json_file};litellm"])
 
 for hidden in hidden_imports:
     command.extend(["--hidden-import", hidden])
