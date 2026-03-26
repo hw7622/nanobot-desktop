@@ -1009,17 +1009,18 @@ function pageAiLegacy() {
 function pageAi() {
   const providers = state.bootstrap.schema.providers || [];
   const current = providers.find((item) => item.key === state.provider) || providers[0] || { key: "", label: "" };
+  const currentProviderConfig = state.draft.providers[current.key] || {};
   const agentFields = state.bootstrap.schema.agents || [];
   const webFields = state.bootstrap.schema.tools.web || [];
   const rootFields = state.bootstrap.schema.tools.root || [];
   const providerFields = current.fields || [];
   const basicProviderFields = [
-    mergeField(providerFields, "apiKey", { key: "apiKey", label: "API Key", type: "password" }),
-    mergeField(providerFields, "apiBase", { key: "apiBase", label: "API Base", type: "text" }),
-  ];
+    resolveField(providerFields, "apiKey", { label: "API Key", type: "password" }),
+    resolveField(providerFields, "apiBase", providerApiBaseFieldMeta(current)),
+  ].filter(Boolean);
   const advancedProviderFields = [
-    mergeField(providerFields, "extraHeaders", { key: "extraHeaders", label: "额外请求头", type: "json" }),
-  ];
+    resolveField(providerFields, "extraHeaders", { label: "额外请求头", type: "json" }),
+  ].filter(Boolean);
   const requiredAgentFields = [
     mergeField(agentFields, "model", { key: "model", label: "默认模型", type: "text" }),
   ];
@@ -1066,8 +1067,9 @@ function pageAi() {
           <div class="section-head workspace-card-head"><div><p class="eyebrow">基础必填项</p><h4>连接主配置</h4></div></div>
           <div class="form-grid ai-required-grid">
             ${renderFields(state.draft.agents.defaults, requiredAgentFields, "agents.defaults")}
-            ${renderFields(state.draft.providers[current.key] || {}, basicProviderFields, `providers.${current.key}`)}
+            ${renderFields(currentProviderConfig, basicProviderFields, `providers.${current.key}`)}
           </div>
+          ${renderProviderRuntimeBlock(current, currentProviderConfig)}
         </article>
         <section class="panel ai-advanced-shell workspace-card">
           <button type="button" class="ai-advanced-toggle ${state.aiAdvancedOpen ? "open" : ""}" id="toggleAiAdvancedBtn" aria-expanded="${state.aiAdvancedOpen ? "true" : "false"}">
@@ -1109,6 +1111,115 @@ function mergeField(fields, key, fallback) {
   const found = (fields || []).find((field) => field.key === key);
   if (!found) return fallback;
   return { ...found, ...fallback };
+}
+
+function resolveField(fields, key, overrides = {}) {
+  const found = (fields || []).find((field) => field.key === key);
+  if (!found) return null;
+  return { ...found, ...overrides };
+}
+
+function providerDefaultApiBase(provider) {
+  return String(provider?.defaultApiBase || "").trim();
+}
+
+function providerConfiguredApiBase(providerConfig) {
+  return String(providerConfig?.apiBase || "").trim();
+}
+
+function providerEffectiveApiBase(provider, providerConfig) {
+  const configured = providerConfiguredApiBase(providerConfig);
+  if (configured) return configured;
+  const fallback = providerDefaultApiBase(provider);
+  if (fallback) return fallback;
+  if (provider?.key === "openai") return "OpenAI 官方默认地址";
+  if (provider?.key === "anthropic") return "Anthropic 官方默认地址";
+  return "";
+}
+
+function providerApiBaseFieldMeta(provider) {
+  const defaultApiBase = providerDefaultApiBase(provider);
+  if (provider?.key === "custom") {
+    return {
+      label: "API Base",
+      type: "text",
+      placeholder: "https://example.com/v1",
+      help: "必须填写你自己的 OpenAI 兼容接口地址。",
+    };
+  }
+  if (provider?.key === "ollama") {
+    return {
+      label: "API Base",
+      type: "text",
+      placeholder: defaultApiBase || "http://localhost:11434/v1",
+      help: `本地 Ollama 一般使用 ${defaultApiBase || "http://localhost:11434/v1"}。`,
+    };
+  }
+  if (provider?.key === "openai") {
+    return {
+      label: "API Base",
+      type: "text",
+      placeholder: "留空使用 OpenAI 官方默认地址",
+      help: "一般留空即可；只有接代理网关或兼容中转时才需要改。",
+    };
+  }
+  if (provider?.key === "anthropic") {
+    return {
+      label: "API Base",
+      type: "text",
+      placeholder: "留空使用 Anthropic 官方默认地址",
+      help: "一般留空即可；只有接代理网关或兼容中转时才需要改。",
+    };
+  }
+  if (defaultApiBase) {
+    return {
+      label: "API Base",
+      type: "text",
+      placeholder: defaultApiBase,
+      help: `留空则使用官方默认：${defaultApiBase}`,
+    };
+  }
+  return {
+    label: "API Base",
+    type: "text",
+  };
+}
+
+function renderProviderRuntimeBlock(provider, providerConfig) {
+  const configured = providerConfiguredApiBase(providerConfig);
+  const defaultApiBase = providerDefaultApiBase(provider);
+  const effective = providerEffectiveApiBase(provider, providerConfig);
+  const notes = [];
+
+  if (provider?.key === "custom") {
+    notes.push("自定义兼容接口必须手动填写 API Base，桌面端不会替你推断默认地址。");
+  } else if (provider?.key === "ollama") {
+    notes.push(`留空时建议使用本地默认地址 ${defaultApiBase || "http://localhost:11434/v1"}。`);
+  } else if (defaultApiBase) {
+    notes.push(`留空时会按官方规则使用默认地址：${defaultApiBase}`);
+  } else if (provider?.key === "openai" || provider?.key === "anthropic") {
+    notes.push("留空时走官方 SDK 默认地址；只有代理或兼容中转时才需要手填。");
+  }
+
+  if (!notes.length && !effective) return "";
+
+  const configuredLine = configured
+    ? `<div><strong>当前配置值：</strong><span class="mono-inline">${esc(configured)}</span></div>`
+    : `<div><strong>当前配置值：</strong><span>留空</span></div>`;
+  const effectiveLine = effective
+    ? `<div><strong>当前生效地址：</strong><span class="mono-inline">${esc(effective)}</span></div>`
+    : "";
+
+  return `
+    <div class="helper-block ai-provider-runtime">
+      <strong>地址说明</strong>
+      ${notes.map((note) => `<p>${esc(note)}</p>`).join("")}
+      <div class="ai-provider-runtime-grid">
+        ${configuredLine}
+        ${effectiveLine}
+      </div>
+    </div>
+  `;
 }
 
 function pageChannels() {

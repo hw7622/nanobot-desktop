@@ -1404,6 +1404,39 @@ code {
   font-size: 0.8rem;
 }
 
+.ai-provider-runtime {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.ai-provider-runtime strong {
+  color: var(--text);
+}
+
+.ai-provider-runtime p {
+  margin: 0;
+}
+
+.ai-provider-runtime-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.ai-provider-runtime-grid div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.mono-inline {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--text);
+  word-break: break-all;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from nanobot.providers.registry import find_by_name
+
 
 PROVIDERS = {
     "openrouter": "OpenRouter",
@@ -182,18 +184,22 @@ PROVIDER_TIMEOUT_FIELD = {"key": "timeoutSeconds", "label": "请求超时(秒)",
 PROVIDER_FIELD_META = {
     "openrouter": [
         {"key": "apiKey", "label": "API Key", "type": "password", "required": True},
+        {"key": "apiBase", "label": "API Base", "type": "text"},
         PROVIDER_TIMEOUT_FIELD,
     ],
     "anthropic": [
         {"key": "apiKey", "label": "API Key", "type": "password", "required": True},
+        {"key": "apiBase", "label": "API Base", "type": "text"},
         PROVIDER_TIMEOUT_FIELD,
     ],
     "openai": [
         {"key": "apiKey", "label": "API Key", "type": "password", "required": True},
+        {"key": "apiBase", "label": "API Base", "type": "text"},
         PROVIDER_TIMEOUT_FIELD,
     ],
     "deepseek": [
         {"key": "apiKey", "label": "API Key", "type": "password", "required": True},
+        {"key": "apiBase", "label": "API Base", "type": "text"},
         PROVIDER_TIMEOUT_FIELD,
     ],
     "dashscope": [
@@ -203,10 +209,12 @@ PROVIDER_FIELD_META = {
     ],
     "gemini": [
         {"key": "apiKey", "label": "API Key", "type": "password", "required": True},
+        {"key": "apiBase", "label": "API Base", "type": "text"},
         PROVIDER_TIMEOUT_FIELD,
     ],
     "moonshot": [
         {"key": "apiKey", "label": "API Key", "type": "password", "required": True},
+        {"key": "apiBase", "label": "API Base", "type": "text"},
         PROVIDER_TIMEOUT_FIELD,
     ],
     "zhipu": [
@@ -328,6 +336,7 @@ def build_schema() -> dict[str, Any]:
                 "key": key,
                 "label": label,
                 "fields": PROVIDER_FIELD_META[key],
+                "defaultApiBase": (find_by_name(key).default_api_base if find_by_name(key) else ""),
             }
             for key, label in PROVIDERS.items()
         ],
