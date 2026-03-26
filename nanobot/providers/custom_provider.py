@@ -31,6 +31,7 @@ class CustomProvider(LLMProvider):
             "Connection": "close",
             **(extra_headers or {}),
         }
+        self._client = self._build_client()
 
     def _build_client(self) -> AsyncOpenAI:
         return AsyncOpenAI(
@@ -55,13 +56,10 @@ class CustomProvider(LLMProvider):
             kwargs["reasoning_effort"] = reasoning_effort
         if tools:
             kwargs.update(tools=tools, tool_choice=tool_choice or "auto")
-        client = self._build_client()
         try:
-            return self._parse(await client.chat.completions.create(**kwargs))
+            return self._parse(await self._client.chat.completions.create(**kwargs))
         except Exception as e:
             return LLMResponse(content=f"Error: {e}", finish_reason="error")
-        finally:
-            await client.close()
 
     def _parse(self, response: Any) -> LLMResponse:
         if not response.choices:
