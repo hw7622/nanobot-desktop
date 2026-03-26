@@ -40,10 +40,12 @@ class LiteLLMProvider(LLMProvider):
         default_model: str = "anthropic/claude-opus-4-5",
         extra_headers: dict[str, str] | None = None,
         provider_name: str | None = None,
+        timeout_seconds: int | None = None,
     ):
         super().__init__(api_key, api_base)
         self.default_model = default_model
         self.extra_headers = extra_headers or {}
+        self.timeout_seconds = max(5, int(timeout_seconds or 45))
 
         # Detect gateway / local deployment.
         # provider_name (from config key) is the primary signal;
@@ -246,6 +248,7 @@ class LiteLLMProvider(LLMProvider):
             "messages": self._sanitize_messages(self._sanitize_empty_content(messages), extra_keys=extra_msg_keys),
             "max_tokens": max_tokens,
             "temperature": temperature,
+            "timeout": self.timeout_seconds,
         }
 
         if self._gateway:

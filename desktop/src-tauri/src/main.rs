@@ -1,14 +1,23 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 use serde::Serialize;
+use std::io::{Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+use std::time::Duration;
 use tauri::Manager;
+use tauri::menu::{MenuBuilder, MenuItemBuilder};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 #[cfg(windows)]
+use std::ffi::OsStr;
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 
 const DEFAULT_UPDATE_ENDPOINT: &str = "https://github.com/hw7622/nanobot-desktop/releases/latest/download/latest.json";
 const DEFAULT_UPDATE_CHANNEL: &str = "stable";
@@ -21,9 +30,19 @@ const AUTO_LAUNCH_REG_NAME: &str = "Nanobot Desktop";
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const TRAY_ID: &str = "main-tray";
+const TRAY_MENU_SHOW: &str = "tray-show";
+const TRAY_MENU_QUIT: &str = "tray-quit";
 
 struct BackendChild(Mutex<Option<Child>>);
 struct PendingUpdate(Mutex<Option<Update>>);
+struct ExitRequested(Mutex<bool>);
+
+enum CloseAction {
+    MinimizeToTray,
+    ExitApp,
+    Cancel,
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -139,37 +158,35 @@ fn main() {
     tauri::Builder::default()
         .manage(BackendChild(Mutex::new(None)))
         .manage(PendingUpdate(Mutex::new(None)))
+        .manage(ExitRequested(Mutex::new(false)))
         .setup(|app| {
             #[cfg(desktop)]
             app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
 
-            if cfg!(debug_assertions) {
-                return Ok(());
-            }
+            setup_tray(app)?;
 
-            let resource_roots = candidate_resource_roots(app);
-            let Some(backend_exe) = find_packaged_exe(&resource_roots, "backend", "nanobot-desktop-backend") else {
-                return Ok(());
-            };
-            let runtime_exe = find_packaged_exe(&resource_roots, "runtime", "nanobot-runtime");
-            let app_data_dir = app.path().app_data_dir().ok();
+            if !cfg!(debug_assertions) {
+                let resource_roots = candidate_resource_roots(app);
+                let Some(backend_exe) = find_packaged_exe(&resource_roots, "backend", "nanobot-desktop-backend") else {
+                    return Ok(());
+                };
+                let runtime_exe = find_packaged_exe(&resource_roots, "runtime", "nanobot-runtime");
 
-            let mut command = Command::new(&backend_exe);
-            command.stdout(Stdio::null()).stderr(Stdio::null());
-            #[cfg(windows)]
-            command.creation_flags(CREATE_NO_WINDOW);
-            if let Some(dir) = app_data_dir {
-                let _ = std::fs::create_dir_all(&dir);
-                command.env("NANOBOT_DESKTOP_DATA_DIR", dir);
-            }
-            if let Some(runtime_exe) = runtime_exe {
-                command.env("NANOBOT_DESKTOP_GATEWAY_BIN", runtime_exe);
-            }
+                let mut command = Command::new(&backend_exe);
+                command.stdout(Stdio::null()).stderr(Stdio::null());
+                #[cfg(windows)]
+                command.creation_flags(CREATE_NO_WINDOW);
+                if let Some(runtime_exe) = runtime_exe {
+                    command.env("NANOBOT_DESKTOP_GATEWAY_BIN", runtime_exe);
+                }
 
-            let child = command.spawn().ok();
-            let state = app.state::<BackendChild>();
-            if let Ok(mut slot) = state.0.lock() {
-                *slot = child;
+                let child = command.spawn().ok();
+                {
+                    let state = app.state::<BackendChild>();
+                    if let Ok(mut slot) = state.0.lock() {
+                        *slot = child;
+                    };
+                }
             }
             Ok(())
         })
@@ -181,7 +198,30 @@ fn main() {
             set_autostart
         ])
         .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let exit_requested = window.state::<ExitRequested>();
+                if exit_requested.0.lock().map(|flag| *flag).unwrap_or(false) {
+                    request_backend_shutdown();
+                    return;
+                }
+
+                api.prevent_close();
+                match prompt_close_action() {
+                    CloseAction::MinimizeToTray => {
+                        let _ = window.hide();
+                    }
+                    CloseAction::ExitApp => {
+                        if let Ok(mut flag) = exit_requested.0.lock() {
+                            *flag = true;
+                        }
+                        request_backend_shutdown();
+                        let _ = window.close();
+                    }
+                    CloseAction::Cancel => {}
+                }
+            }
             if matches!(event, tauri::WindowEvent::Destroyed) {
+                request_backend_shutdown();
                 let state = window.state::<BackendChild>();
                 let mut slot = match state.0.lock() {
                     Ok(slot) => slot,
@@ -195,6 +235,123 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running Nanobot Desktop");
+}
+
+fn setup_tray<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
+    let show_item = MenuItemBuilder::with_id(TRAY_MENU_SHOW, "显示主窗口").build(app)?;
+    let quit_item = MenuItemBuilder::with_id(TRAY_MENU_QUIT, "退出").build(app)?;
+    let menu = MenuBuilder::new(app)
+        .items(&[&show_item, &quit_item])
+        .build()?;
+
+    let mut builder = TrayIconBuilder::with_id(TRAY_ID)
+        .menu(&menu)
+        .tooltip("Nanobot Desktop")
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app: &tauri::AppHandle<R>, event| match event.id().as_ref() {
+            TRAY_MENU_SHOW => {
+                let _ = show_main_window(app);
+            }
+            TRAY_MENU_QUIT => {
+                if let Ok(mut flag) = app.state::<ExitRequested>().0.lock() {
+                    *flag = true;
+                }
+                request_backend_shutdown();
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray: &tauri::tray::TrayIcon<R>, event| match event {
+            TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. }
+            | TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } => {
+                let _ = show_main_window(tray.app_handle());
+            }
+            _ => {}
+        });
+
+    if let Some(icon) = app.default_window_icon().cloned() {
+        builder = builder.icon(icon);
+    }
+
+    let _ = builder.build(app)?;
+    Ok(())
+}
+
+fn show_main_window<R: tauri::Runtime, M: tauri::Manager<R>>(manager: &M) -> tauri::Result<()> {
+    if let Some(window) = manager.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn prompt_close_action() -> CloseAction {
+    const MB_YESNOCANCEL: u32 = 0x0000_0003;
+    const MB_ICONQUESTION: u32 = 0x0000_0020;
+    const IDYES: i32 = 6;
+    const IDNO: i32 = 7;
+
+    unsafe extern "system" {
+        fn MessageBoxW(hwnd: *mut core::ffi::c_void, text: *const u16, caption: *const u16, typ: u32) -> i32;
+    }
+
+    let message = to_wide("关闭窗口时如何处理？\n\n是：最小化到托盘并继续后台运行\n否：直接关闭程序\n取消：返回当前窗口");
+    let caption = to_wide("Nanobot Desktop");
+    let result = unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            message.as_ptr(),
+            caption.as_ptr(),
+            MB_YESNOCANCEL | MB_ICONQUESTION,
+        )
+    };
+
+    match result {
+        IDYES => CloseAction::MinimizeToTray,
+        IDNO => CloseAction::ExitApp,
+        _ => CloseAction::Cancel,
+    }
+}
+
+#[cfg(not(windows))]
+fn prompt_close_action() -> CloseAction {
+    CloseAction::ExitApp
+}
+
+#[cfg(windows)]
+fn to_wide(value: &str) -> Vec<u16> {
+    OsStr::new(value)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+fn request_backend_shutdown() {
+    let mut addrs = match ("127.0.0.1", 18791).to_socket_addrs() {
+        Ok(addrs) => addrs,
+        Err(_) => return,
+    };
+    let Some(addr) = addrs.next() else {
+        return;
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(600)) else {
+        return;
+    };
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(600)));
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(600)));
+    let request = concat!(
+        "POST /api/shutdown HTTP/1.1\r\n",
+        "Host: 127.0.0.1:18791\r\n",
+        "Connection: close\r\n",
+        "Content-Length: 0\r\n\r\n"
+    );
+    if stream.write_all(request.as_bytes()).is_err() {
+        return;
+    }
+    let mut buffer = [0_u8; 256];
+    let _ = stream.read(&mut buffer);
 }
 
 fn build_update_status(app: &tauri::AppHandle, pending: Option<UpdatePayload>) -> UpdateConfigPayload {

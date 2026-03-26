@@ -1,7 +1,10 @@
 """Session management for conversation history."""
 
 import json
+import os
 import shutil
+import tempfile
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -193,24 +196,81 @@ class SessionManager:
         """Save a session to disk."""
         path = self._get_session_path(session.key)
 
-        with open(path, "w", encoding="utf-8") as f:
-            metadata_line = {
-                "_type": "metadata",
-                "key": session.key,
-                "created_at": session.created_at.isoformat(),
-                "updated_at": session.updated_at.isoformat(),
-                "metadata": session.metadata,
-                "last_consolidated": session.last_consolidated
-            }
-            f.write(json.dumps(metadata_line, ensure_ascii=False) + "\n")
-            for msg in session.messages:
-                f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+        metadata_line = {
+            "_type": "metadata",
+            "key": session.key,
+            "created_at": session.created_at.isoformat(),
+            "updated_at": session.updated_at.isoformat(),
+            "metadata": session.metadata,
+            "last_consolidated": session.last_consolidated
+        }
+        payload_lines = [json.dumps(metadata_line, ensure_ascii=False)]
+        payload_lines.extend(json.dumps(msg, ensure_ascii=False) for msg in session.messages)
+        payload = "\n".join(payload_lines) + "\n"
+
+        last_error: Exception | None = None
+        for attempt in range(8):
+            tmp_name = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    "w",
+                    encoding="utf-8",
+                    dir=self.sessions_dir,
+                    prefix=f"{path.stem}.",
+                    suffix=".tmp",
+                    delete=False,
+                ) as f:
+                    tmp_name = f.name
+                    f.write(payload)
+                    f.flush()
+                    os.fsync(f.fileno())
+
+                os.replace(tmp_name, path)
+                self._cache[session.key] = session
+                return
+            except (PermissionError, OSError) as e:
+                last_error = e
+                logger.warning(
+                    "Failed to save session {} on attempt {}/8: {}",
+                    session.key,
+                    attempt + 1,
+                    e,
+                )
+                if tmp_name:
+                    try:
+                        os.unlink(tmp_name)
+                    except OSError:
+                        pass
+                time.sleep(0.1 * (attempt + 1))
+
+        if last_error is not None:
+            raise last_error
 
         self._cache[session.key] = session
 
     def invalidate(self, key: str) -> None:
         """Remove a session from the in-memory cache."""
         self._cache.pop(key, None)
+
+    def clear_session(self, key: str) -> Session:
+        """Clear a session and persist the empty state."""
+        session = self.get_or_create(key)
+        session.clear()
+        self.save(session)
+        return session
+
+    def delete_session(self, key: str) -> bool:
+        """Delete a session from disk and cache."""
+        removed = False
+        self.invalidate(key)
+        for path in (self._get_session_path(key), self._get_legacy_session_path(key)):
+            try:
+                if path.exists():
+                    path.unlink()
+                    removed = True
+            except FileNotFoundError:
+                continue
+        return removed
 
     def list_sessions(self) -> list[dict[str, Any]]:
         """

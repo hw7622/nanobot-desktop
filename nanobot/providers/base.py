@@ -75,6 +75,7 @@ class LLMProvider(ABC):
     """
 
     _CHAT_RETRY_DELAYS = (1, 2, 4)
+    _TIMEOUT_RETRY_DELAYS = (1,)
     _TRANSIENT_ERROR_MARKERS = (
         "429",
         "rate limit",
@@ -96,6 +97,12 @@ class LLMProvider(ABC):
         self.api_key = api_key
         self.api_base = api_base
         self.generation: GenerationSettings = GenerationSettings()
+
+    def _retry_delays_for_error(self, text: str | None) -> tuple[int, ...]:
+        lowered = (text or "").lower()
+        if "timeout" in lowered or "timed out" in lowered:
+            return self._TIMEOUT_RETRY_DELAYS
+        return self._CHAT_RETRY_DELAYS
 
     @staticmethod
     def _sanitize_empty_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -252,7 +259,8 @@ class LLMProvider(ABC):
             reasoning_effort=reasoning_effort, tool_choice=tool_choice,
         )
 
-        for attempt, delay in enumerate(self._CHAT_RETRY_DELAYS, start=1):
+        attempt = 0
+        while True:
             response = await self._safe_chat(**kw)
 
             if response.finish_reason != "error":
@@ -265,14 +273,19 @@ class LLMProvider(ABC):
                     return await self._safe_chat(**{**kw, "messages": stripped})
                 return response
 
+            retry_delays = self._retry_delays_for_error(response.content)
+            if attempt >= len(retry_delays):
+                return response
+
+            delay = retry_delays[attempt]
+            attempt += 1
+
             logger.warning(
                 "LLM transient error (attempt {}/{}), retrying in {}s: {}",
-                attempt, len(self._CHAT_RETRY_DELAYS), delay,
+                attempt, len(retry_delays), delay,
                 (response.content or "")[:120].lower(),
             )
             await asyncio.sleep(delay)
-
-        return await self._safe_chat(**kw)
 
     @abstractmethod
     def get_default_model(self) -> str:

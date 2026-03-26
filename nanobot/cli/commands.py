@@ -382,6 +382,7 @@ def _make_provider(config: Config):
             api_base=config.get_api_base(model) or "http://localhost:8000/v1",
             default_model=model,
             extra_headers=p.extra_headers if p else None,
+            timeout_seconds=p.timeout_seconds if p else None,
         )
     # Azure OpenAI: direct Azure OpenAI endpoint with deployment name
     elif provider_name == "azure_openai":
@@ -409,6 +410,7 @@ def _make_provider(config: Config):
             default_model=model,
             extra_headers=p.extra_headers if p else None,
             provider_name=provider_name,
+            timeout_seconds=p.timeout_seconds if p else None,
         )
 
     defaults = config.agents.defaults

@@ -11,12 +11,28 @@ from typing import Any
 
 from nanobot.config.schema import Config
 from nanobot.providers.registry import find_by_name
+from nanobot.config.paths import get_workspace_path as get_core_workspace_path
 
-from nanobot_desktop_backend.paths import ensure_dirs, get_config_path, get_data_dir, get_workspace_dir
+from nanobot_desktop_backend.paths import (
+    ensure_dirs,
+    get_config_path,
+    get_desktop_state_path,
+    get_workspace_dir,
+)
 from nanobot_desktop_backend.schemas import default_config_payload
 
 
 SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _read_json(path: Path, fallback: dict[str, Any]) -> dict[str, Any]:
+    try:
+        if not path.exists():
+            return fallback
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else fallback
+    except Exception:
+        return fallback
 
 
 def _merge_desktop_defaults(payload: dict[str, Any]) -> dict[str, Any]:
@@ -27,6 +43,78 @@ def _merge_desktop_defaults(payload: dict[str, Any]) -> dict[str, Any]:
     app.setdefault("autoLaunch", False)
     chat = desktop.setdefault("chat", {})
     chat.setdefault("refreshIntervalSeconds", 3)
+    return payload
+
+
+def _default_desktop_state() -> dict[str, Any]:
+    return _merge_desktop_defaults({})["desktop"]
+
+
+def load_desktop_state() -> dict[str, Any]:
+    payload = _merge_desktop_defaults({"desktop": _read_json(get_desktop_state_path(), {})})
+    return payload["desktop"]
+
+
+def save_desktop_state(payload: dict[str, Any] | None) -> dict[str, Any]:
+    state = _merge_desktop_defaults({"desktop": payload or {}})["desktop"]
+    path = get_desktop_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+    return state
+
+
+def _split_runtime_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    core = dict(payload)
+    desktop = core.pop("desktop", {})
+    if not isinstance(desktop, dict):
+        desktop = {}
+    return core, _merge_desktop_defaults({"desktop": desktop})["desktop"]
+
+
+def _load_core_config_payload() -> dict[str, Any]:
+    config_path = get_config_path()
+    if not config_path.exists():
+        for legacy_path in _legacy_config_candidates():
+            payload = _read_json(legacy_path, {})
+            if not payload:
+                continue
+            core_payload, desktop_state = _split_runtime_payload(payload)
+            core_payload = _normalize_workspace(core_payload)
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(json.dumps(core_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            save_desktop_state(desktop_state)
+            return core_payload
+        workspace = str(get_workspace_dir())
+        payload = default_config_payload(workspace)
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        if not get_desktop_state_path().exists():
+            save_desktop_state(_default_desktop_state())
+        return payload
+
+    payload = _read_json(config_path, {})
+    if not payload:
+        payload = default_config_payload(str(get_workspace_dir()))
+        config_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        if not get_desktop_state_path().exists():
+            save_desktop_state(_default_desktop_state())
+        return payload
+
+    migrated = False
+    if "desktop" in payload:
+        desktop_state = save_desktop_state(payload.get("desktop", {}))
+        payload = {key: value for key, value in payload.items() if key != "desktop"}
+        migrated = True
+    else:
+        desktop_state = load_desktop_state()
+
+    payload = _normalize_workspace(payload)
+
+    if migrated:
+        config_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    elif not get_desktop_state_path().exists():
+        save_desktop_state(desktop_state)
+
     return payload
 
 
@@ -42,6 +130,38 @@ def _templates_dir() -> Path:
 
 def _skills_dir() -> Path:
     return _repo_root() / "nanobot" / "skills"
+
+
+def _legacy_config_candidates() -> list[Path]:
+    return [
+        Path.home() / "AppData" / "Roaming" / "com.nanobot.desktop" / "config.json",
+        Path.home() / "AppData" / "Local" / "NanobotDesktop" / "config.json",
+        _repo_root() / ".desktop-data" / "config.json",
+    ]
+
+
+def _legacy_workspace_candidates() -> list[Path]:
+    return [
+        Path.home() / "AppData" / "Roaming" / "com.nanobot.desktop" / "workspace",
+        Path.home() / "AppData" / "Local" / "NanobotDesktop" / "workspace",
+        _repo_root() / ".desktop-data" / "workspace",
+    ]
+
+
+def _normalize_workspace(payload: dict[str, Any]) -> dict[str, Any]:
+    defaults = payload.setdefault("agents", {}).setdefault("defaults", {})
+    raw = str(defaults.get("workspace") or "").strip()
+    default_workspace = str(get_core_workspace_path())
+    if not raw:
+        defaults["workspace"] = default_workspace
+        return payload
+
+    workspace = Path(raw).expanduser()
+    for legacy_root in _legacy_workspace_candidates():
+        if workspace == legacy_root:
+            defaults["workspace"] = default_workspace
+            break
+    return payload
 
 
 def _sync_workspace_templates(workspace: Path) -> None:
@@ -69,23 +189,16 @@ def _sync_workspace_templates(workspace: Path) -> None:
 
 def ensure_default_config() -> dict[str, Any]:
     ensure_dirs()
-    config_path = get_config_path()
-    workspace = get_workspace_dir()
-    if config_path.exists():
-        payload = load_runtime_config()
-        payload.setdefault("agents", {}).setdefault("defaults", {}).setdefault("workspace", str(workspace))
-    else:
-        payload = default_config_payload(str(workspace))
-        config_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    payload = load_runtime_config()
     _sync_workspace_templates(Path(payload["agents"]["defaults"]["workspace"]).expanduser())
     return payload
 
 
 def load_runtime_config() -> dict[str, Any]:
-    config_path = get_config_path()
-    if not config_path.exists():
-        return ensure_default_config()
-    return _merge_desktop_defaults(json.loads(config_path.read_text(encoding="utf-8")))
+    ensure_dirs()
+    payload = _load_core_config_payload()
+    payload["desktop"] = load_desktop_state()
+    return payload
 
 
 def dump_runtime_config() -> dict[str, Any]:
@@ -151,7 +264,9 @@ def save_runtime_config(payload: dict[str, Any]) -> dict[str, Any]:
     config_path.parent.mkdir(parents=True, exist_ok=True)
     payload = _merge_desktop_defaults(payload)
     workspace = payload.setdefault("agents", {}).setdefault("defaults", {}).setdefault("workspace", str(get_workspace_dir()))
-    config_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    core_payload, desktop_state = _split_runtime_payload(payload)
+    config_path.write_text(json.dumps(core_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    save_desktop_state(desktop_state)
     _sync_workspace_templates(Path(workspace).expanduser())
     return payload
 
@@ -170,9 +285,9 @@ def get_skill_inventory() -> dict[str, Any]:
     builtin_root = _skills_dir()
     workspace_root = workspace / "skills"
     legacy_roots = [
-        get_data_dir() / "workspace" / "skills",
         _repo_root() / ".desktop-data" / "workspace" / "skills",
-        Path.home() / ".nanobot" / "workspace" / "skills",
+        Path.home() / "AppData" / "Roaming" / "com.nanobot.desktop" / "workspace" / "skills",
+        Path.home() / "AppData" / "Local" / "NanobotDesktop" / "workspace" / "skills",
     ]
     items: list[dict[str, Any]] = []
     seen_files: set[str] = set()

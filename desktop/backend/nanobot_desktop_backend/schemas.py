@@ -177,26 +177,52 @@ CHANNEL_FIELD_META = {
     ],
 }
 
+PROVIDER_TIMEOUT_FIELD = {"key": "timeoutSeconds", "label": "请求超时(秒)", "type": "number", "placeholder": "留空默认 45"}
+
 PROVIDER_FIELD_META = {
-    "openrouter": [{"key": "apiKey", "label": "API Key", "type": "password", "required": True}],
-    "anthropic": [{"key": "apiKey", "label": "API Key", "type": "password", "required": True}],
-    "openai": [{"key": "apiKey", "label": "API Key", "type": "password", "required": True}],
-    "deepseek": [{"key": "apiKey", "label": "API Key", "type": "password", "required": True}],
+    "openrouter": [
+        {"key": "apiKey", "label": "API Key", "type": "password", "required": True},
+        PROVIDER_TIMEOUT_FIELD,
+    ],
+    "anthropic": [
+        {"key": "apiKey", "label": "API Key", "type": "password", "required": True},
+        PROVIDER_TIMEOUT_FIELD,
+    ],
+    "openai": [
+        {"key": "apiKey", "label": "API Key", "type": "password", "required": True},
+        PROVIDER_TIMEOUT_FIELD,
+    ],
+    "deepseek": [
+        {"key": "apiKey", "label": "API Key", "type": "password", "required": True},
+        PROVIDER_TIMEOUT_FIELD,
+    ],
     "dashscope": [
         {"key": "apiKey", "label": "API Key", "type": "password", "required": True},
         {"key": "apiBase", "label": "API Base", "type": "text"},
+        PROVIDER_TIMEOUT_FIELD,
     ],
-    "gemini": [{"key": "apiKey", "label": "API Key", "type": "password", "required": True}],
-    "moonshot": [{"key": "apiKey", "label": "API Key", "type": "password", "required": True}],
+    "gemini": [
+        {"key": "apiKey", "label": "API Key", "type": "password", "required": True},
+        PROVIDER_TIMEOUT_FIELD,
+    ],
+    "moonshot": [
+        {"key": "apiKey", "label": "API Key", "type": "password", "required": True},
+        PROVIDER_TIMEOUT_FIELD,
+    ],
     "zhipu": [
         {"key": "apiKey", "label": "API Key", "type": "password", "required": True},
         {"key": "apiBase", "label": "API Base", "type": "text"},
+        PROVIDER_TIMEOUT_FIELD,
     ],
-    "ollama": [{"key": "apiBase", "label": "API Base", "type": "text", "required": True, "placeholder": "http://localhost:11434"}],
+    "ollama": [
+        {"key": "apiBase", "label": "API Base", "type": "text", "required": True, "placeholder": "http://localhost:11434"},
+        PROVIDER_TIMEOUT_FIELD,
+    ],
     "custom": [
         {"key": "apiKey", "label": "API Key", "type": "password", "required": True},
         {"key": "apiBase", "label": "API Base", "type": "text", "required": True},
         {"key": "extraHeaders", "label": "额外请求头", "type": "json"},
+        PROVIDER_TIMEOUT_FIELD,
     ],
 }
 
@@ -291,11 +317,6 @@ def default_config_payload(workspace: str) -> dict[str, Any]:
             "exec": {"timeout": 60, "pathAppend": ""},
             "restrictToWorkspace": False,
             "mcpServers": {},
-        },
-        "desktop": {
-            "gateway": {"autoStart": True},
-            "app": {"autoLaunch": False},
-            "chat": {"refreshIntervalSeconds": 3},
         },
     }
 

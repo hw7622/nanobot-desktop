@@ -4,7 +4,8 @@
   "version": "0.1.1",
   "scripts": {
     "dev:backend": "python run_backend.py",
-    "dev": "cargo tauri dev",
+    "dev": "powershell -ExecutionPolicy Bypass -File .\\run_tauri_dev_hidden.ps1",
+    "dev:console": "cargo tauri dev",
     "build": "cargo tauri build"
   }
 }

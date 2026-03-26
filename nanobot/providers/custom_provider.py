@@ -19,19 +19,26 @@ class CustomProvider(LLMProvider):
         api_base: str = "http://localhost:8000/v1",
         default_model: str = "default",
         extra_headers: dict[str, str] | None = None,
+        timeout_seconds: int | None = None,
     ):
         super().__init__(api_key, api_base)
         self.default_model = default_model
+        self.timeout_seconds = max(5, int(timeout_seconds or 45))
         # Keep affinity stable for this provider instance to improve backend cache locality,
         # while still letting users attach provider-specific headers for custom gateways.
-        default_headers = {
+        self._default_headers = {
             "x-session-affinity": uuid.uuid4().hex,
+            "Connection": "close",
             **(extra_headers or {}),
         }
-        self._client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=api_base,
-            default_headers=default_headers,
+
+    def _build_client(self) -> AsyncOpenAI:
+        return AsyncOpenAI(
+            api_key=self.api_key,
+            base_url=self.api_base,
+            default_headers=self._default_headers,
+            timeout=self.timeout_seconds,
+            max_retries=0,
         )
 
     async def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
@@ -48,10 +55,13 @@ class CustomProvider(LLMProvider):
             kwargs["reasoning_effort"] = reasoning_effort
         if tools:
             kwargs.update(tools=tools, tool_choice=tool_choice or "auto")
+        client = self._build_client()
         try:
-            return self._parse(await self._client.chat.completions.create(**kwargs))
+            return self._parse(await client.chat.completions.create(**kwargs))
         except Exception as e:
             return LLMResponse(content=f"Error: {e}", finish_reason="error")
+        finally:
+            await client.close()
 
     def _parse(self, response: Any) -> LLMResponse:
         if not response.choices:
@@ -75,4 +85,3 @@ class CustomProvider(LLMProvider):
 
     def get_default_model(self) -> str:
         return self.default_model
-

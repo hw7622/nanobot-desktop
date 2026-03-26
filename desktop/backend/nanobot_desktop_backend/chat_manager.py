@@ -21,18 +21,21 @@ class ChatManager:
     """Provides a lightweight desktop-local chat session for testing config."""
 
     SESSION_KEY = "desktop:console"
+    CHANNEL_NAME = "desktop"
+    CHAT_ID = "console"
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._signature: str | None = None
         self._agent: AgentLoop | None = None
+        self._bus: MessageBus | None = None
         self._sessions: SessionManager | None = None
         self._workspace: Path | None = None
 
     def history(self) -> list[dict[str, Any]]:
         with self._lock:
             self._ensure_sessions_unlocked()
-            return self._history_unlocked()
+            return self._history_unlocked(self.SESSION_KEY)
 
     def clear(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -43,27 +46,41 @@ class ChatManager:
             self._sessions.save(session)
             return []
 
-    def send(self, content: str) -> dict[str, Any]:
+    def send(
+        self,
+        content: str,
+        *,
+        session_key: str | None = None,
+        channel: str = CHANNEL_NAME,
+        chat_id: str = CHAT_ID,
+    ) -> dict[str, Any]:
         message = (content or "").strip()
         if not message:
             raise ValueError("消息内容不能为空")
 
+        resolved_session_key = (session_key or "").strip() or f"{channel}:{chat_id}"
         with self._lock:
             self._ensure_agent_unlocked()
             assert self._agent is not None
+            self._drain_outbound_unlocked()
             response = asyncio.run(
                 self._agent.process_direct(
                     message,
-                    session_key=self.SESSION_KEY,
-                    channel="desktop",
-                    chat_id="console",
+                    session_key=resolved_session_key,
+                    channel=channel,
+                    chat_id=chat_id,
                 )
             )
-            return {"reply": response, "history": self._history_unlocked()}
+            outbound = self._drain_outbound_unlocked()
+            return {
+                "reply": response,
+                "history": self._history_unlocked(resolved_session_key),
+                "outbound": outbound,
+            }
 
-    def _history_unlocked(self) -> list[dict[str, Any]]:
+    def _history_unlocked(self, session_key: str) -> list[dict[str, Any]]:
         assert self._sessions is not None
-        session = self._sessions.get_or_create(self.SESSION_KEY)
+        session = self._sessions.get_or_create(session_key)
         return [self._serialize_message(message) for message in session.messages]
 
     def _ensure_sessions_unlocked(self) -> None:
@@ -89,8 +106,9 @@ class ChatManager:
         config = Config.model_validate(payload)
         provider = _make_provider(config)
         assert self._sessions is not None
+        bus = MessageBus()
         agent = AgentLoop(
-            bus=MessageBus(),
+            bus=bus,
             provider=provider,
             workspace=config.workspace_path,
             model=config.agents.defaults.model,
@@ -107,6 +125,7 @@ class ChatManager:
         )
         self._signature = signature
         self._agent = agent
+        self._bus = bus
 
     def _serialize_message(self, message: dict[str, Any]) -> dict[str, Any]:
         role = str(message.get("role") or "assistant")
@@ -131,3 +150,22 @@ class ChatManager:
             "timestamp": message.get("timestamp", ""),
             "name": message.get("name", ""),
         }
+
+    def _drain_outbound_unlocked(self) -> list[dict[str, Any]]:
+        if self._bus is None:
+            return []
+
+        items: list[dict[str, Any]] = []
+        while True:
+            try:
+                message = self._bus.outbound.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            items.append({
+                "channel": message.channel,
+                "chatId": message.chat_id,
+                "content": str(message.content or ""),
+                "media": list(message.media or []),
+                "metadata": dict(message.metadata or {}),
+            })
+        return items

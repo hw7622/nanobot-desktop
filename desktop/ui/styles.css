@@ -1377,6 +1377,16 @@ code {
   background: #f8fafc;
 }
 
+.button.danger {
+  border-color: rgba(220, 38, 38, 0.24);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.button.danger:hover {
+  border-color: rgba(220, 38, 38, 0.34);
+}
+
 .field-card {
   display: grid;
   gap: 10px;
@@ -1605,12 +1615,14 @@ code {
   position: relative;
   z-index: 10;
   pointer-events: auto;
-  flex: 0 0 auto;
+  flex: 1 1 auto;
   min-width: 0;
-  min-height: 240px;
-  height: 240px;
-  max-height: 240px;
+  min-height: 0;
+  height: auto;
+  max-height: none;
   display: grid;
+  grid-auto-rows: minmax(92px, auto);
+  align-content: start;
   gap: 10px;
   overflow: auto;
   padding-right: 2px;
@@ -1625,6 +1637,7 @@ code {
   align-items: start;
   width: 100%;
   min-width: 0;
+  min-height: 92px;
   padding: 16px 16px 16px 22px;
   border: 1px solid transparent;
   border-radius: 16px;
@@ -2021,6 +2034,9 @@ code {
   color: #4ade80;
   font-size: 0.84rem;
   line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .logs-page {
@@ -2034,15 +2050,37 @@ code {
 
 .logs-page-head {
   display: flex;
-  justify-content: flex-end;
+  justify-content: space-between;
   align-items: center;
+  gap: 12px;
   flex: 0 0 auto;
+}
+
+.logs-page-meta {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.logs-page-meta strong,
+.logs-page-meta .muted {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .logs-page-actions {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  flex-shrink: 0;
+}
+
+.logs-source-strip {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .logs-terminal-shell {
@@ -2056,6 +2094,9 @@ code {
   height: 100%;
   min-height: 0;
   max-height: none;
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
 }
 
 .shell.chat-immersive .topbar {

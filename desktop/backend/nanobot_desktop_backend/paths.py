@@ -1,43 +1,64 @@
-"""Desktop app paths."""
+"""Desktop app paths rooted under the official nanobot data directory."""
 
 from __future__ import annotations
 
-import os
-import sys
 from pathlib import Path
 
+from nanobot.config.loader import get_config_path as get_core_config_path, load_config
+from nanobot.config.paths import get_workspace_path as get_core_workspace_path
 
-APP_DIRNAME = "NanobotDesktop"
-OVERRIDE_ENV = "NANOBOT_DESKTOP_DATA_DIR"
+
+def _ensure_dir(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def get_data_dir() -> Path:
-    """Return the user data directory for the desktop app."""
-    override = os.environ.get(OVERRIDE_ENV)
-    if override:
-        return Path(override).expanduser()
-    if sys.platform == "win32":
-        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-        return Path(base) / APP_DIRNAME
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / APP_DIRNAME
-    return Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "nanobot-desktop"
+    """Return the shared nanobot data root (config parent)."""
+    return _ensure_dir(get_config_path().parent)
+
+
+def get_desktop_dir() -> Path:
+    """Return the desktop-shell dedicated data directory."""
+    return _ensure_dir(get_data_dir() / "desktop")
+
+
+def get_desktop_state_path() -> Path:
+    return get_desktop_dir() / "state.json"
+
+
+def get_desktop_plugins_dir() -> Path:
+    return _ensure_dir(get_desktop_dir() / "plugins")
+
+
+def get_weixin_plugin_dir() -> Path:
+    return get_desktop_plugins_dir() / "nanobot-weixin-plugin"
 
 
 def get_config_path() -> Path:
-    return get_data_dir() / "config.json"
+    """Return the official nanobot core config path."""
+    return get_core_config_path()
 
 
 def get_workspace_dir() -> Path:
-    return get_data_dir() / "workspace"
+    """Return the configured workspace path from the core config."""
+    config_path = get_config_path()
+    if config_path.exists():
+        try:
+            return _ensure_dir(load_config(config_path).workspace_path)
+        except Exception:
+            pass
+    return get_core_workspace_path()
 
 
 def get_logs_dir() -> Path:
-    return get_data_dir() / "logs"
+    """Return the desktop-shell logs directory."""
+    return _ensure_dir(get_desktop_dir() / "logs")
 
 
 def ensure_dirs() -> None:
-    """Ensure all required app directories exist."""
-    get_data_dir().mkdir(parents=True, exist_ok=True)
-    get_workspace_dir().mkdir(parents=True, exist_ok=True)
-    get_logs_dir().mkdir(parents=True, exist_ok=True)
+    """Ensure all required shared and desktop-specific directories exist."""
+    _ensure_dir(get_data_dir())
+    _ensure_dir(get_desktop_dir())
+    _ensure_dir(get_logs_dir())
+    _ensure_dir(get_workspace_dir())

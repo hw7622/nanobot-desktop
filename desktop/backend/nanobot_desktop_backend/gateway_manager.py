@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime
@@ -50,7 +51,7 @@ class GatewayManager:
 
             self._gateway_log.parent.mkdir(parents=True, exist_ok=True)
             self._rotate_logs_unlocked()
-            self._log_handle = open(self._gateway_log, "a", encoding="utf-8")
+            self._log_handle = self._open_log_handle_unlocked()
             command = self._resolve_gateway_command()
             self._status_note = ""
             self._status_code = ""
@@ -155,7 +156,25 @@ class GatewayManager:
     def _write_note_unlocked(self, note: str) -> None:
         self._gateway_log.parent.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self._gateway_log.write_text(f"{timestamp} {note}\n", encoding="utf-8")
+        try:
+            self._gateway_log.write_text(f"{timestamp} {note}\n", encoding="utf-8")
+        except PermissionError:
+            fallback = self._fallback_log_path_unlocked()
+            fallback.parent.mkdir(parents=True, exist_ok=True)
+            fallback.write_text(f"{timestamp} {note}\n", encoding="utf-8")
+            self._gateway_log = fallback
+
+    def _open_log_handle_unlocked(self):
+        try:
+            return open(self._gateway_log, "a", encoding="utf-8")
+        except PermissionError:
+            fallback = self._fallback_log_path_unlocked()
+            fallback.parent.mkdir(parents=True, exist_ok=True)
+            self._gateway_log = fallback
+            return open(self._gateway_log, "a", encoding="utf-8")
+
+    def _fallback_log_path_unlocked(self) -> Path:
+        return Path(tempfile.gettempdir()) / "nanobot-desktop-logs" / "gateway.log"
 
     def _resolve_gateway_command(self) -> list[str]:
         override = os.environ.get("NANOBOT_DESKTOP_GATEWAY_BIN")

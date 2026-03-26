@@ -3,7 +3,7 @@
   { id: "ai", short: "AI", label: "AI 配置", hint: "Provider、模型与高级参数" },
   { id: "channels", short: "CN", label: "渠道配置", hint: "Telegram、飞书等入口开关" },
   { id: "skills", short: "SK", label: "Skills", hint: "技能卡片与工作区目录" },
-  { id: "logs", short: "LG", label: "实时日志", hint: "全屏查看 Gateway 日志" },
+  { id: "logs", short: "LG", label: "实时日志", hint: "全屏查看聚合日志" },
 ];
 
 const API_BASE = (() => {
@@ -24,7 +24,7 @@ const state = {
   provider: "openrouter",
   logs: [],
   sessions: [],
-  selectedSessionKey: "desktop:console",
+  selectedSessionKey: "",
   selectedSession: null,
   selectedSessionItems: [],
   chatDraft: "",
@@ -42,12 +42,24 @@ const state = {
   autoLaunchNote: "",
   logStickBottom: true,
   logScrollTop: 0,
+  logPath: "",
+  logLineCount: 0,
+  logUpdatedAt: 0,
+  logLastRefreshAt: 0,
+  logSelectionPaused: false,
+  logRefreshBusy: false,
+  logSource: "gateway",
   chatStickBottom: true,
   chatScrollTop: 0,
   pageScrollTops: {},
   aiAdvancedOpen: false,
   weixinLogin: null,
   weixinBusy: "",
+  chatRefreshBusy: false,
+  chatManualRefreshBusy: false,
+  chatRefreshQueued: false,
+  chatRefreshQueuedManual: false,
+  sessionActionBusy: "",
 };
 
 let refreshHandle = 0;
@@ -135,7 +147,7 @@ async function refreshBootstrap() {
   state.provider = state.draft.agents.defaults.provider || "openrouter";
   await refreshLogs();
   await refreshSessions();
-  if (!state.selectedSessionKey && state.sessions.length) state.selectedSessionKey = state.sessions[0].key;
+  if (!state.selectedSessionKey && state.sessions.length) state.selectedSessionKey = defaultSessionKey(state.sessions);
   await refreshSelectedSession();
 }
 
@@ -152,22 +164,36 @@ async function refreshRuntime() {
     ensureDesktopConfig(state.bootstrap.config);
     await refreshLogs();
     renderHeader();
-    if (["dashboard", "logs", "skills"].includes(state.tab)) renderBody();
+    if (state.tab === "logs") updateLogsView();
+    else if (["dashboard", "skills"].includes(state.tab)) renderBody();
   } catch (error) {
     state.bootstrapError = `状态刷新失败：${error.message || error}`;
     renderHeader();
   }
 }
 
-async function refreshChatData() {
+async function refreshChatData(options = {}) {
+  const force = Boolean(options.force);
+  const manual = Boolean(options.manual);
   if (!state.bootstrap) return;
+  if (state.chatRefreshBusy) {
+    if (force) {
+      state.chatRefreshQueued = true;
+      state.chatRefreshQueuedManual = state.chatRefreshQueuedManual || manual;
+      if (manual) {
+        state.chatManualRefreshBusy = true;
+        if (state.tab === "chat") renderBody();
+      }
+    }
+    return;
+  }
+  state.chatRefreshBusy = true;
+  if (manual) {
+    state.chatManualRefreshBusy = true;
+    if (state.tab === "chat") renderBody();
+  }
   captureChatScroll();
   try {
-    const payload = await fetchJson("/api/bootstrap");
-    state.bootstrap.status = payload.status;
-    state.bootstrap.meta = payload.meta;
-    state.bootstrap.skills = payload.skills;
-    state.bootstrap.weixin = payload.weixin;
     await refreshSessions();
     await refreshSelectedSession();
     renderHeader();
@@ -175,6 +201,15 @@ async function refreshChatData() {
   } catch (error) {
     state.bootstrapError = `聊天刷新失败：${error.message || error}`;
     renderHeader();
+  } finally {
+    state.chatRefreshBusy = false;
+    const queued = state.chatRefreshQueued;
+    const queuedManual = state.chatRefreshQueuedManual;
+    state.chatRefreshQueued = false;
+    state.chatRefreshQueuedManual = false;
+    if (!queued) state.chatManualRefreshBusy = false;
+    if (state.tab === "chat") renderBody();
+    if (queued) void refreshChatData({ force: true, manual: queuedManual });
   }
 }
 
@@ -202,8 +237,12 @@ async function refreshVisibleData() {
 }
 
 async function refreshLogs() {
-  const payload = await fetchJson("/api/logs?name=gateway&lines=220");
+  const payload = await fetchJson(`/api/logs?name=${encodeURIComponent(state.logSource || "all")}&lines=1000`);
   state.logs = payload.lines || [];
+  state.logPath = payload.path || "";
+  state.logLineCount = Number(payload.lineCount || 0);
+  state.logUpdatedAt = payload.updatedAt ? Number(payload.updatedAt) * 1000 : 0;
+  state.logLastRefreshAt = Date.now();
   if (state.bootstrap?.status) state.bootstrap.status.logArchives = payload.archives || [];
 }
 
@@ -211,18 +250,23 @@ async function refreshSessions() {
   const payload = await fetchJson("/api/sessions");
   state.sessions = payload.items || [];
   if (!state.sessions.some((item) => item.key === state.selectedSessionKey)) {
-    state.selectedSessionKey = state.sessions[0]?.key || "desktop:console";
+    state.selectedSessionKey = defaultSessionKey(state.sessions);
   }
+  state.selectedSession = state.sessions.find((item) => item.key === state.selectedSessionKey) || null;
 }
 
 async function refreshSelectedSession() {
-  if (!state.selectedSessionKey) return;
+  if (!state.selectedSessionKey) {
+    state.selectedSession = null;
+    state.selectedSessionItems = [];
+    return;
+  }
   try {
     const payload = await fetchJson(`/api/session?key=${encodeURIComponent(state.selectedSessionKey)}`);
-    state.selectedSession = payload.session;
+    state.selectedSession = payload.session || state.sessions.find((item) => item.key === state.selectedSessionKey) || null;
     state.selectedSessionItems = payload.items || [];
   } catch {
-    state.selectedSession = null;
+    state.selectedSession = state.sessions.find((item) => item.key === state.selectedSessionKey) || null;
     state.selectedSessionItems = [];
   }
 }
@@ -460,10 +504,79 @@ async function refreshWeixinStatus(renderAfter = true) {
   if (renderAfter) renderBody();
 }
 
+function describeWeixinStartFailure(status) {
+  const note = String(status?.note || "").trim();
+  const logPath = String(status?.apiLogPath || "").trim();
+  const parts = [];
+  if (note) parts.push(note);
+  if (logPath) parts.push(`日志：${logPath}`);
+  return parts.join("；") || "微信插件接口启动失败。";
+}
+
 async function ensureWeixinApiReady() {
   if (!state.bootstrap.weixin?.apiRunning) {
-    await fetchJson("/api/weixin/api/start", { method: "POST" });
+    const payload = await fetchJson("/api/weixin/api/start", { method: "POST" });
+    if (state.bootstrap) state.bootstrap.weixin = payload.status || {};
     await refreshWeixinStatus(false);
+  }
+  if (!state.bootstrap.weixin?.apiRunning) {
+    throw new Error(describeWeixinStartFailure(state.bootstrap.weixin));
+  }
+}
+
+async function clearSelectedSession() {
+  const sessionKey = String(state.selectedSessionKey || "").trim();
+  if (!sessionKey || state.chatBusy || state.sessionActionBusy) return;
+  const isDesktop = sessionKey === "desktop:console";
+  const label = state.selectedSession?.title || sessionKey;
+  if (!window.confirm(`确定清空会话“${label}”吗？`)) return;
+  state.sessionActionBusy = "clear";
+  renderBody();
+  try {
+    if (isDesktop) {
+      const payload = await fetchJson("/api/chat/clear", { method: "POST" });
+      state.selectedSessionItems = payload.items || [];
+    } else {
+      const payload = await fetchJson("/api/session/clear", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: sessionKey }),
+      });
+      state.selectedSession = payload.session || state.selectedSession;
+      state.selectedSessionItems = payload.items || [];
+    }
+    state.chatStickBottom = true;
+    await refreshSessions();
+    await refreshSelectedSession();
+  } catch (error) {
+    window.alert(`清空会话失败：${error.message || error}`);
+  } finally {
+    state.sessionActionBusy = "";
+    renderBody();
+  }
+}
+
+async function deleteSelectedSession() {
+  const sessionKey = String(state.selectedSessionKey || "").trim();
+  if (!sessionKey || sessionKey === "desktop:console" || state.chatBusy || state.sessionActionBusy) return;
+  const label = state.selectedSession?.title || sessionKey;
+  if (!window.confirm(`确定删除会话“${label}”吗？删除后会从列表中移除。`)) return;
+  state.sessionActionBusy = "delete";
+  renderBody();
+  try {
+    await fetchJson("/api/session/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: sessionKey }),
+    });
+    await refreshSessions();
+    await refreshSelectedSession();
+    state.chatStickBottom = true;
+  } catch (error) {
+    window.alert(`删除会话失败：${error.message || error}`);
+  } finally {
+    state.sessionActionBusy = "";
+    renderBody();
   }
 }
 
@@ -475,6 +588,7 @@ async function weixinAction(action, payload = null) {
     if (action === "startApi") {
       await fetchJson("/api/weixin/api/start", { method: "POST" });
       await refreshWeixinStatus(false);
+      if (!state.bootstrap.weixin?.apiRunning) throw new Error(describeWeixinStartFailure(state.bootstrap.weixin));
       state.lastSaveMessage = "微信接口已启动。";
     } else if (action === "stopApi") {
       await fetchJson("/api/weixin/api/stop", { method: "POST" });
@@ -537,6 +651,11 @@ function stopWeixinLoginPolling() {
 
 async function syncWeixinEnabled(enabled) {
   if (state.weixinBusy) return;
+  if (enabled && !state.bootstrap.weixin?.installed) {
+    window.alert("未检测到微信插件。请先安装微信插件，再启用微信渠道。");
+    renderBody();
+    return;
+  }
   applyValue("channels.weixin.enabled", enabled);
   renderHeader();
   renderBody();
@@ -550,7 +669,7 @@ async function syncWeixinEnabled(enabled) {
         await refreshWeixinStatus(false);
         state.lastSaveMessage = "微信渠道已开启。";
       } else {
-        state.lastSaveMessage = "微信渠道已开启，请扫码登录。";
+        state.lastSaveMessage = state.bootstrap.weixin?.apiRunning ? "微信接口已启动，请扫码登录。" : "微信渠道启用失败。";
       }
     } else {
       stopWeixinLoginPolling();
@@ -626,16 +745,38 @@ async function pollWeixinLoginOnce() {
 }
 
 async function copyLogs() {
-  await copyText(logText());
+  const text = selectedLogText();
+  if (!text) {
+    window.alert("请先选中需要复制的日志内容。");
+    return;
+  }
+  await copyText(text);
 }
 
-function clearLogView() {
+async function clearLogs() {
+  if (!window.confirm("确定清空当前实时日志吗？这会清空 Gateway、Desktop、Weixin API 和 Weixin Runtime 日志。")) return;
+  await fetchJson("/api/logs/clear", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "all" }),
+  });
   state.logs = [];
+  state.logLineCount = 0;
+  state.logUpdatedAt = Date.now();
+  state.logLastRefreshAt = Date.now();
   state.logStickBottom = true;
-  renderBody();
+  state.logSelectionPaused = false;
+  if (state.bootstrap?.status) state.bootstrap.status.logArchives = [];
+  if (state.tab === "logs") updateLogsView(true);
+  state.lastSaveMessage = "日志已清空。";
+  renderHeader();
 }
 
 async function copyText(text) {
+  if (!text) {
+    window.alert("没有可复制的内容。");
+    return;
+  }
   try {
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(text);
@@ -644,6 +785,25 @@ async function copyText(text) {
       return;
     }
   } catch {}
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "readonly");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  textarea.style.top = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  textarea.setSelectionRange(0, textarea.value.length);
+  try {
+    if (document.execCommand("copy")) {
+      state.lastSaveMessage = "内容已复制到剪贴板。";
+      renderHeader();
+      return;
+    }
+  } catch {}
+  finally {
+    document.body.removeChild(textarea);
+  }
   window.prompt("请手动复制以下内容", text);
 }
 
@@ -706,7 +866,7 @@ function setTab(tabId) {
     state.chatStickBottom = true;
     state.chatScrollTop = 0;
     render();
-    void refreshChatData();
+    void refreshChatData({ force: true });
     return;
   }
   render();
@@ -751,7 +911,8 @@ function renderBody() {
   els.content.innerHTML = (pages[state.tab] || pageDashboard)();
   bindPage();
   restorePageScroll();
-  restoreLogScroll();
+  if (state.tab === "logs") updateLogsView(true);
+  else restoreLogScroll();
   restoreChatScroll();
 }
 
@@ -785,6 +946,7 @@ function pageDashboard() {
             <button class="button" data-open-target="workspace">打开工作区</button>
             <button class="button" data-open-target="logs">打开日志目录</button>
             <button class="button" data-open-target="skills">打开 Skills 目录</button>
+            <button class="button" data-open-target="weixinPlugin">打开插件目录</button>
           </div>
         </article>
         <article class="panel stack-card dashboard-card">
@@ -953,6 +1115,9 @@ function pageChannels() {
   const channels = state.bootstrap.schema.channels || [];
   const enabled = channels.filter((channel) => (state.draft.channels[channel.key] || channel.defaultConfig || {}).enabled).length;
   const weixin = state.bootstrap.weixin || {};
+  const weixinStatus = !weixin.installed
+    ? "未安装插件"
+    : (weixin.loggedIn ? "已登录" : (weixin.apiRunning ? "待登录" : "未启动"));
   return pageFrame(`
     <div class="page-stack page-scroll-stack workspace-page">
       <section class="workspace-hero">
@@ -967,7 +1132,7 @@ function pageChannels() {
         <section class="workspace-hero-side workspace-hero-side-tight">
           <div class="mini-stats">
             <div class="mini-stat"><span>Telegram</span><strong>${(state.draft.channels.telegram || {}).enabled ? "开" : "关"}</strong></div>
-            <div class="mini-stat"><span>微信</span><strong>${weixin.loggedIn ? "已登录" : (weixin.apiRunning ? "待登录" : "未启动")}</strong></div>
+            <div class="mini-stat"><span>微信</span><strong>${weixinStatus}</strong></div>
           </div>
         </section>
       </section>
@@ -1005,17 +1170,31 @@ function pageSkillsLegacy() {
 }
 
 function pageLogs() {
+  const sources = [
+    { key: "gateway", label: "Gateway" },
+    { key: "weixin-runtime", label: "微信 Runtime" },
+    { key: "weixin-api", label: "微信 API" },
+    { key: "all", label: "全部" },
+    { key: "desktop", label: "Desktop" },
+  ];
   return `
     <div class="logs-page">
       <header class="logs-page-head">
+        <div class="logs-page-meta">
+          <strong>聚合日志</strong>
+          <span class="muted mono-inline" id="logsMetaText">${esc(logStatusText())}</span>
+        </div>
         <div class="logs-page-actions">
-          <button class="button button-ghost" id="refreshLogsBtn">刷新</button>
-          <button class="button button-ghost" id="clearLogsBtn">清空视图</button>
-          <button class="button button-ghost" id="copyLogsBtn">复制</button>
+          <button class="button button-ghost" id="refreshLogsBtn" ${state.logRefreshBusy ? "disabled" : ""}>${state.logRefreshBusy ? "刷新中..." : "刷新"}</button>
+          <button class="button button-ghost" id="clearLogsBtn">清空日志</button>
+          <button class="button button-ghost" id="copyLogsBtn">复制选中</button>
         </div>
       </header>
+      <div class="logs-source-strip">
+        ${sources.map((item) => `<button class="button ${state.logSource === item.key ? "button-primary" : "button-ghost"}" data-log-source="${escAttr(item.key)}">${esc(item.label)}</button>`).join("")}
+      </div>
       <div class="terminal-shell logs-terminal-shell">
-        <pre class="terminal-window logs-terminal-window" id="gatewayLogPre">${esc(logText())}</pre>
+        <pre class="terminal-window logs-terminal-window" id="gatewayLogPre" tabindex="0">${esc(logText())}</pre>
       </div>
     </div>
   `;
@@ -1024,6 +1203,8 @@ function pageLogs() {
 function pageChat() {
   const selected = state.selectedSession;
   const readonly = selected ? selected.readonly : true;
+  const isDesktopSession = String(selected?.key || state.selectedSessionKey || "") === "desktop:console";
+  const clearLabel = isDesktopSession ? "清空测试会话" : "清空会话";
   return `
     <div class="chat-page immersive">
       <aside class="chat-rail">
@@ -1045,8 +1226,10 @@ function pageChat() {
           </div>
           <div class="chat-stage-meta">
             <span class="channel-badge">${esc(selected?.channel || "desktop")}</span>
-            <button class="button button-ghost" id="refreshChatBtn">刷新</button>
-            ${readonly ? `<span class="pill">只读</span>` : `<button class="button button-ghost" id="clearChatBtn" ${state.chatBusy ? "disabled" : ""}>清空测试会话</button>`}
+            <button class="button button-ghost" id="refreshChatBtn" ${state.chatManualRefreshBusy ? "disabled" : ""}>${state.chatManualRefreshBusy ? "刷新中..." : "刷新"}</button>
+            ${selected ? `<button class="button button-ghost" id="clearSessionBtn" ${(state.chatBusy || state.sessionActionBusy) ? "disabled" : ""}>${state.sessionActionBusy === "clear" ? "清空中..." : clearLabel}</button>` : ""}
+            ${selected && !isDesktopSession ? `<button class="button button-ghost danger" id="deleteSessionBtn" ${state.sessionActionBusy ? "disabled" : ""}>${state.sessionActionBusy === "delete" ? "删除中..." : "删除会话"}</button>` : ""}
+            ${readonly ? `<span class="pill">只读</span>` : ``}
           </div>
         </header>
         <div class="chat-feed-shell"><div class="chat-feed" id="chatFeed">${renderChatFeed()}</div></div>
@@ -1124,9 +1307,12 @@ function renderChannelCard(channel) {
 
 function renderWeixinChannelCard(channel, cfg, fields, expanded, configuredCount) {
   const plugin = state.bootstrap.weixin || {};
+  const installed = Boolean(plugin.installed);
   const sessions = state.sessions.filter((item) => item.channel === "weixin");
   const login = state.weixinLogin;
   const qrImage = login?.qrUrl ? qrImageUrl(login.qrUrl) : "";
+  const channelState = !installed ? "未安装插件" : (plugin.loggedIn ? "已登录" : (plugin.apiRunning ? "待登录" : "未启动"));
+  const bridgeState = !plugin.apiRunning ? "未运行" : (!plugin.loggedIn ? "待登录" : (plugin.bridge?.running ? "运行中" : "已停止"));
   return `
     <article class="channel-card channel-accordion ${cfg.enabled ? "" : "disabled"} ${expanded ? "open" : ""}">
       <button class="channel-accordion-head" type="button" data-toggle-channel="${escAttr(channel.key)}" aria-expanded="${expanded ? "true" : "false"}">
@@ -1135,7 +1321,7 @@ function renderWeixinChannelCard(channel, cfg, fields, expanded, configuredCount
           <div><p class="eyebrow">${esc(channel.key)}</p><h4>${esc(channel.label)}</h4></div>
         </div>
         <div class="channel-accordion-meta">
-          <span class="channel-state">${plugin.loggedIn ? "已登录" : plugin.apiRunning ? "待登录" : "未启动"}</span>
+          <span class="channel-state">${channelState}</span>
           <span class="workspace-chip">${configuredCount}/${fields.length}</span>
           <span class="channel-accordion-chevron" aria-hidden="true">⌄</span>
         </div>
@@ -1149,16 +1335,18 @@ function renderWeixinChannelCard(channel, cfg, fields, expanded, configuredCount
           </label>
         </div>
         <div class="weixin-status-grid">
+          <div class="status-chip-card"><span>插件</span><strong>${installed ? "已安装" : "未安装"}</strong></div>
           <div class="status-chip-card"><span>渠道</span><strong>${cfg.enabled ? "已开启" : "已关闭"}</strong></div>
           <div class="status-chip-card"><span>接口</span><strong>${plugin.apiRunning ? "运行中" : "未运行"}</strong></div>
           <div class="status-chip-card"><span>登录</span><strong>${plugin.loggedIn ? "已登录" : "未登录"}</strong></div>
-          <div class="status-chip-card"><span>桥接</span><strong>${plugin.bridge?.running ? "运行中" : "已停止"}</strong></div>
+          <div class="status-chip-card"><span>桥接</span><strong>${bridgeState}</strong></div>
           <div class="status-chip-card"><span>会话</span><strong>${sessions.length}</strong></div>
         </div>
         <div class="weixin-action-row">
-          <button class="button button-primary" id="startWeixinLoginBtn" ${(!cfg.enabled || state.weixinBusy) ? "disabled" : ""}>扫码登录</button>
-          <button class="button" id="logoutWeixinBtn" ${(!plugin.loggedIn || state.weixinBusy) ? "disabled" : ""}>退出登录</button>
+          <button class="button button-primary" id="startWeixinLoginBtn" ${(!installed || !cfg.enabled || state.weixinBusy) ? "disabled" : ""}>扫码登录</button>
+          <button class="button" id="logoutWeixinBtn" ${(!installed || !plugin.loggedIn || state.weixinBusy) ? "disabled" : ""}>退出登录</button>
         </div>
+        ${!installed ? `<p class="muted">未检测到微信插件，请先在工作区安装微信插件后再启用该渠道。</p>` : ""}
         ${(login && login.qrUrl) ? `
         <section class="weixin-login-panel">
           <div class="weixin-login-copy">
@@ -1296,10 +1484,11 @@ function renderSessionList() {
 }
 
 function renderChatFeed() {
-  if (!state.selectedSessionItems.length) {
+  const items = visibleChatItems();
+  if (!items.length) {
     return `<div class="chat-empty"><div class="empty-illustration small">...</div><h4>当前会话还没有消息</h4><p>从左侧选择一个会话，或使用桌面测试会话发送消息。</p></div>`;
   }
-  return state.selectedSessionItems.map((item) => {
+  return items.map((item) => {
     const userSide = item.role === "user";
     return `
       <article class="bubble-row ${userSide ? "user" : "assistant"}">
@@ -1368,9 +1557,11 @@ function bindPage() {
   for (const button of document.querySelectorAll("[data-delete-skill]")) button.onclick = () => deleteSkill(button.dataset.deleteSkill);
   for (const button of document.querySelectorAll("[data-remove-mcp]")) button.onclick = () => { delete (state.draft.tools.mcpServers || {})[button.dataset.removeMcp]; state.restartRecommended = true; render(); };
 
-  document.getElementById("refreshChatBtn")?.addEventListener("click", async () => { await refreshChatData(); });
+  document.getElementById("refreshChatBtn")?.addEventListener("click", async () => { await refreshChatData({ force: true, manual: true }); });
   document.getElementById("sendChatBtn")?.addEventListener("click", sendChatMessage);
   document.getElementById("clearChatBtn")?.addEventListener("click", clearChatHistory);
+  document.getElementById("clearSessionBtn")?.addEventListener("click", clearSelectedSession);
+  document.getElementById("deleteSessionBtn")?.addEventListener("click", deleteSelectedSession);
   document.getElementById("createSkillBtn")?.addEventListener("click", createSkill);
   document.getElementById("openSkillsEmptyBtn")?.addEventListener("click", () => openTarget("skills"));
   document.getElementById("addMcpBtn")?.addEventListener("click", () => {
@@ -1389,9 +1580,17 @@ function bindPage() {
   document.getElementById("refreshOverviewDesktopStateBtn")?.addEventListener("click", async () => { await refreshUpdaterState(false); await refreshAutoLaunchState(false); renderBody(); });
   document.getElementById("checkUpdatesBtn")?.addEventListener("click", checkUpdates);
   document.getElementById("installUpdateBtn")?.addEventListener("click", installUpdate);
-  document.getElementById("refreshLogsBtn")?.addEventListener("click", async () => { captureLogScroll(); await refreshLogs(); renderBody(); });
-  document.getElementById("clearLogsBtn")?.addEventListener("click", clearLogView);
+  document.getElementById("refreshLogsBtn")?.addEventListener("click", refreshLogsView);
+  document.getElementById("clearLogsBtn")?.addEventListener("click", clearLogs);
   document.getElementById("copyLogsBtn")?.addEventListener("click", copyLogs);
+  for (const button of document.querySelectorAll("[data-log-source]")) {
+    button.addEventListener("click", () => {
+      state.logSource = button.dataset.logSource || "all";
+      state.logStickBottom = true;
+      state.logSelectionPaused = false;
+      void refreshLogsView();
+    });
+  }
   document.getElementById("toggleAiAdvancedBtn")?.addEventListener("click", toggleAiAdvancedPanel);
   document.getElementById("startWeixinLoginBtn")?.addEventListener("click", () => weixinAction("startLogin"));
   document.getElementById("logoutWeixinBtn")?.addEventListener("click", () => weixinAction("logout"));
@@ -1460,6 +1659,7 @@ function captureLogScroll() {
   if (!node) return;
   state.logScrollTop = node.scrollTop;
   state.logStickBottom = node.scrollTop + node.clientHeight >= node.scrollHeight - 20;
+  updateLogsMeta();
 }
 
 function getPageScrollNode() {
@@ -1531,6 +1731,149 @@ function roleLabel(role, name) {
   return role || "assistant";
 }
 
+function visibleChatItems() {
+  const items = Array.isArray(state.selectedSessionItems) ? state.selectedSessionItems : [];
+  if (isDesktopConsoleSession()) return items;
+  return projectExternalChatItems(items);
+}
+
+function isDesktopConsoleSession() {
+  return String(state.selectedSessionKey || "") === "desktop:console";
+}
+
+function projectExternalChatItems(items) {
+  const visible = [];
+  let currentUser = null;
+  let outboundAssistants = [];
+  let fallbackAssistants = [];
+
+  const flushTurn = () => {
+    if (currentUser && hasRenderableMessageContent(currentUser)) visible.push(currentUser);
+    const assistants = outboundAssistants.length ? outboundAssistants : fallbackAssistants;
+    for (const item of assistants) {
+      if (shouldRenderExternalChatItem(item)) visible.push(item);
+    }
+    currentUser = null;
+    outboundAssistants = [];
+    fallbackAssistants = [];
+  };
+
+  for (const item of items) {
+    if (!item || typeof item !== "object") continue;
+    if (item.role === "user") {
+      flushTurn();
+      currentUser = item;
+      continue;
+    }
+    if (!currentUser) continue;
+    const toolOutboundItems = extractMessageToolCallItems(item);
+    if (toolOutboundItems.length) {
+      outboundAssistants.push(...toolOutboundItems);
+      fallbackAssistants = [];
+      continue;
+    }
+    if (isExplicitOutboundItem(item)) {
+      outboundAssistants.push(item);
+      continue;
+    }
+    if (item.role === "tool") {
+      fallbackAssistants = [];
+      continue;
+    }
+    if (item.role !== "assistant") continue;
+    if (Array.isArray(item.toolCalls) && item.toolCalls.length) {
+      fallbackAssistants = [];
+      continue;
+    }
+    if (hasRenderableMessageContent(item)) fallbackAssistants.push(item);
+  }
+
+  flushTurn();
+  return visible;
+}
+
+function shouldRenderExternalChatItem(item) {
+  if (!item || typeof item !== "object") return false;
+  if (item.role === "user") return hasRenderableMessageContent(item);
+  if (item.role !== "assistant") return false;
+  if (Array.isArray(item.toolCalls) && item.toolCalls.length) return false;
+  return hasRenderableMessageContent(item);
+}
+
+function isExplicitOutboundItem(item) {
+  return Boolean(item?.metadata && item.metadata._desktop_visible_outbound);
+}
+
+function extractMessageToolCallItems(item) {
+  if (!item || item.role !== "assistant" || !Array.isArray(item.toolCalls) || !item.toolCalls.length) return [];
+  const sessionChannel = String(state.selectedSession?.channel || state.selectedSessionKey.split(":")[0] || "");
+  const sessionChatId = String(state.selectedSession?.chatId || state.selectedSessionKey.split(":").slice(1).join(":") || "");
+  const results = [];
+  for (const toolCall of item.toolCalls) {
+    const fn = toolCall?.function;
+    if (!fn || fn.name !== "message" || typeof fn.arguments !== "string") continue;
+    let args;
+    try {
+      args = JSON.parse(fn.arguments);
+    } catch {
+      continue;
+    }
+    if (!args || typeof args !== "object") continue;
+    if (String(args.channel || "") !== sessionChannel) continue;
+    if (String(args.chat_id || "") !== sessionChatId) continue;
+    const mediaLines = Array.isArray(args.media) ? args.media.map((media) => formatOutboundMediaLine(media)).filter(Boolean) : [];
+    const text = typeof args.content === "string" ? args.content.trim() : "";
+    if (text || mediaLines.length) {
+      results.push(buildSyntheticOutboundItem(item, text, mediaLines));
+      continue;
+    }
+    if (!text && !mediaLines.length) {
+      results.push(buildSyntheticOutboundItem(item, "[已发送消息]"));
+    }
+  }
+  return results;
+}
+
+function buildSyntheticOutboundItem(sourceItem, text, extraLines = []) {
+  const lines = [];
+  if (typeof text === "string" && text.trim()) lines.push(text.trim());
+  for (const line of extraLines) {
+    if (typeof line === "string" && line.trim()) lines.push(line.trim());
+  }
+  return {
+    role: "assistant",
+    name: sourceItem?.name || "",
+    timestamp: sourceItem?.timestamp || "",
+    content: lines.join("\n\n").trim(),
+    metadata: { _desktop_projected_outbound: true },
+  };
+}
+
+function formatOutboundMediaLine(media) {
+  const raw = String(media || "").trim();
+  if (!raw) return "";
+  const normalized = raw.replace(/\\/g, "/");
+  const name = normalized.split("/").pop() || raw;
+  const lower = name.toLowerCase();
+  if (/\.(png|jpg|jpeg|gif|webp|bmp)$/.test(lower)) return `[图片] ${name}`;
+  if (/\.(mp4|mov|m4v|webm)$/.test(lower)) return `[视频] ${name}`;
+  if (/\.(mp3|wav|ogg|aac|m4a|silk)$/.test(lower)) return `[音频] ${name}`;
+  return `[文件] ${name}`;
+}
+
+function hasRenderableMessageContent(item) {
+  const content = item?.content;
+  if (typeof content === "string") return content.trim().length > 0;
+  if (Array.isArray(content)) return content.some((part) => {
+    if (typeof part === "string") return part.trim().length > 0;
+    if (!part || typeof part !== "object") return false;
+    if (typeof part.text === "string" && part.text.trim()) return true;
+    if (typeof part.content === "string" && part.content.trim()) return true;
+    return false;
+  });
+  return false;
+}
+
 function formatUpdatedAt(value) {
   if (!value) return "刚刚";
   const date = new Date(value);
@@ -1548,6 +1891,11 @@ function shortTimestamp(value) {
 function shortPath(value) {
   const text = String(value || "");
   return text.length > 64 ? `...${text.slice(-61)}` : text;
+}
+
+function defaultSessionKey(items) {
+  const list = Array.isArray(items) ? items : [];
+  return list.find((item) => item.key !== "desktop:console")?.key || list[0]?.key || "desktop:console";
 }
 
 function providerQuickHintLegacy(key) {
@@ -1588,6 +1936,77 @@ function providerDisplayName(key, fallback) {
 
 function logText() {
   return state.logs.length ? state.logs.join("\n") : "暂无日志输出。";
+}
+
+function logStatusText() {
+  const updated = state.logUpdatedAt ? shortTimestamp(state.logUpdatedAt) : "--:--";
+  const refreshed = state.logLastRefreshAt ? shortTimestamp(state.logLastRefreshAt) : "--:--";
+  const follow = state.logStickBottom ? "自动跟随" : "暂停跟随";
+  const paused = state.logSelectionPaused ? " · 选中文本时暂停更新" : "";
+  const source = {
+    all: "全部",
+    gateway: "Gateway",
+    "weixin-runtime": "微信 Runtime",
+    "weixin-api": "微信 API",
+    desktop: "Desktop",
+  }[state.logSource || "all"] || (state.logSource || "all");
+  return `${source} · ${follow} · ${state.logLineCount} 行 · 文件更新 ${updated} · 刷新 ${refreshed}${paused}`;
+}
+
+function updateLogsMeta() {
+  const node = document.getElementById("logsMetaText");
+  if (node) node.textContent = logStatusText();
+}
+
+function selectedLogText() {
+  const selection = window.getSelection?.();
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return "";
+  const logNode = document.getElementById("gatewayLogPre");
+  if (!logNode) return "";
+  const range = selection.getRangeAt(0);
+  if (!logNode.contains(range.commonAncestorContainer)) return "";
+  return selection.toString();
+}
+
+function isLogSelectionActive() {
+  return Boolean(selectedLogText());
+}
+
+function updateLogsView(force = false) {
+  const node = document.getElementById("gatewayLogPre");
+  if (!node) return;
+  const previousScrollTop = node.scrollTop;
+  const wasAtBottom = state.logStickBottom || previousScrollTop + node.clientHeight >= node.scrollHeight - 20;
+  if (!force && isLogSelectionActive()) {
+    state.logSelectionPaused = true;
+    updateLogsMeta();
+    return;
+  }
+  state.logSelectionPaused = false;
+  const nextText = logText();
+  if (node.textContent !== nextText) node.textContent = nextText;
+  if (wasAtBottom) node.scrollTop = node.scrollHeight;
+  else node.scrollTop = previousScrollTop;
+  captureLogScroll();
+}
+
+async function refreshLogsView() {
+  if (state.logRefreshBusy) return;
+  state.logRefreshBusy = true;
+  renderBody();
+  try {
+    captureLogScroll();
+    await refreshLogs();
+    if (state.tab === "logs") updateLogsView(true);
+    state.lastSaveMessage = `日志已刷新 ${shortTimestamp(Date.now())}`;
+    renderHeader();
+  } catch (error) {
+    state.lastSaveMessage = `日志刷新失败：${error.message || error}`;
+    renderHeader();
+  } finally {
+    state.logRefreshBusy = false;
+    if (state.tab === "logs") renderBody();
+  }
 }
 
 function isDirty() {

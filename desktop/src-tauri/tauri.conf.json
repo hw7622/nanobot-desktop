@@ -4,7 +4,7 @@
   "version": "0.1.1",
   "identifier": "com.nanobot.desktop",
   "build": {
-    "beforeDevCommand": "set \"NANOBOT_DESKTOP_DATA_DIR=.\\.desktop-data\" && C:\\Users\\huwei\\AppData\\Local\\Programs\\Python\\Python313\\pythonw.exe .\\run_backend.py",
+    "beforeDevCommand": ".\\run_backend_dev.bat",
     "beforeBuildCommand": "",
     "devUrl": "http://127.0.0.1:18791",
     "frontendDist": "../ui"
