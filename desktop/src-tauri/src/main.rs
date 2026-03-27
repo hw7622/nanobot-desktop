@@ -6,6 +6,7 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+use std::time::Instant;
 use std::time::Duration;
 use tauri::Manager;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
@@ -127,10 +128,18 @@ async fn install_update(
         return Err("当前没有可安装的更新，请先执行检查更新。".to_string());
     };
 
+    stop_managed_backend(&app);
+
     update
         .download_and_install(|_chunk_length, _content_length| {}, || {})
         .await
         .map_err(|err| err.to_string())?;
+
+    let app_handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(800));
+        app_handle.exit(0);
+    });
 
     Ok(build_update_status(&app, None))
 }
@@ -325,6 +334,60 @@ fn request_backend_shutdown() {
     let mut buffer = [0_u8; 256];
     let _ = stream.read(&mut buffer);
 }
+
+fn stop_managed_backend(app: &tauri::AppHandle) {
+    request_backend_shutdown();
+
+    let state = app.state::<BackendChild>();
+    let child = match state.0.lock() {
+        Ok(mut slot) => slot.take(),
+        Err(_) => None,
+    };
+
+    let Some(mut child) = child else {
+        std::thread::sleep(Duration::from_millis(1200));
+        return;
+    };
+
+    if wait_for_child_exit(&mut child, Duration::from_secs(6)) {
+        return;
+    }
+
+    kill_process_tree(&child);
+    let _ = child.kill();
+    let _ = wait_for_child_exit(&mut child, Duration::from_secs(3));
+    let _ = child.wait();
+}
+
+fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(_) => return false,
+        }
+    }
+}
+
+#[cfg(windows)]
+fn kill_process_tree(child: &Child) {
+    let mut command = Command::new("taskkill");
+    command
+        .args(["/PID", &child.id().to_string(), "/T", "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW);
+    let _ = command.status();
+}
+
+#[cfg(not(windows))]
+fn kill_process_tree(_child: &Child) {}
 
 fn close_prompt_script() -> &'static str {
     r#"
