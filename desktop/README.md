@@ -7,8 +7,9 @@
 - 本地控制后端：配置 API、schema、skills 清单、日志读取
 - 静态控制台 UI：AI、渠道、MCP、Skills、运行控制
 - 桌面壳：Tauri 启动后自动拉起打包进安装包的 backend/runtime
+- 微信渠道：桌面壳已切到官方内置微信渠道，不再依赖独立微信插件 API / 桥接
 - 安装包：可生成 `NSIS` 和 `MSI`
-- 自动更新 MVP：UI 已有“检查更新 / 安装更新”入口，Rust 侧已接入 updater 命令
+- 自动更新 MVP：UI 已有手动“检查更新 / 安装更新”入口，Rust 侧已接入 updater 命令
 - GitHub Release 流程：已补 `publish-desktop.yml` 工作流和 updater 配置脚本
 
 ## 当前开发入口
@@ -54,6 +55,26 @@ cargo tauri build
 - `ui/`: 静态控制台界面
 - `src-tauri/`: Tauri 桌面壳与 updater 命令
 - `scripts/prepare_release_config.py`: CI 中注入真实 updater 配置
+
+## 微信渠道说明
+
+当前桌面端已经直接接入官方内置微信渠道：
+
+- 核心实现：`nanobot/channels/weixin.py`
+- 桌面壳接线：`desktop/backend/nanobot_desktop_backend/weixin_manager.py`
+
+桌面端当前不再依赖：
+
+- 独立微信插件目录
+- 桌面壳侧插件 API 启停
+- 桥接进程启停
+
+微信相关状态由桌面后端直接管理，前端只保留：
+
+- 扫码登录
+- 退出登录
+- 渠道启用/停用
+- 运行态 / 会话 / 上下文等状态展示
 
 ## 自动更新接入说明
 
@@ -119,7 +140,7 @@ Publish Desktop
 
 ## 本阶段限制
 
-- 还没有实际跑 GitHub Actions 发版，因为这一步依赖你在 GitHub 里先放好签名密钥
+- GitHub Actions 发版链路已经跑通过；后续发新版时注意同步递增桌面版本号，避免重复 tag
 - 当前 release workflow 先做 Windows；macOS 发布流后续再补
 - 目前主要验证的是 Windows 路径
 

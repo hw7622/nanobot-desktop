@@ -7,7 +7,10 @@
 
 ## Current Status
 
-- Desktop UI/config work is ongoing on top of release `0.1.1`.
+- Current working branch: `feat/use-official-weixin`
+- Desktop branch state is now aligned with official `upstream/main` and keeps a desktop-specific shell on top.
+- The desktop shell has been migrated from the old standalone Weixin plugin path to the official built-in Weixin channel.
+- Latest desktop version in this branch is `0.1.3`.
 - Core desktop/backend/runtime build chain is usable locally.
 - A larger desktop UI architecture rewrite is now in place under `desktop/ui/`.
 - This UI pass intentionally stays on the existing no-build static frontend (`index.html` + `app.js` + `styles.css`) instead of introducing a React/Tailwind toolchain, so local desktop startup stays stable.
@@ -335,178 +338,57 @@ Launch the rebuilt local desktop app and have the user verify:
 
 If any of those still fail, continue from the rebuilt local state in this repo; do not trust older running binaries.
 
-## 2026-03-22 Weixin Plugin Shell Integration
+## 2026-03-27 Official Weixin Integration
 
-- Confirmed from the real desktop workspace session:
-  - `telegram:1300030695` documents a standalone `nanobot-weixin-plugin`
-  - the plugin already exposes login / bridge / account / send-media HTTP APIs on `127.0.0.1:31966`
-  - this integration should stay in the desktop shell layer, not by modifying `nanobot` core
-- Added a desktop-side plugin manager:
-  - new file: `desktop/backend/nanobot_desktop_backend/weixin_manager.py`
-  - detects plugin install state from `workspace/nanobot-weixin-plugin`
-  - can start / stop the plugin API process with `node src/index.js api`
-  - proxies login / bridge / account requests to the plugin API
-  - reads local plugin state when the API is not running
-- Rebuilt desktop backend schema metadata:
-  - `desktop/backend/nanobot_desktop_backend/schemas.py` was rewritten cleanly
-  - added `channels.weixin`
-  - added shell-side fields for the standalone plugin:
-    - `apiPort`
-    - `baseUrl`
-    - `pluginDir`
-    - `autoStartApi`
-    - `autoStartBridge`
-  - also removed a large chunk of previous mojibake labels in schema metadata
-- Rebuilt `desktop/backend/nanobot_desktop_backend/app.py` cleanly:
-  - bootstrap now returns `weixin` status
-  - added shell endpoints:
-    - `GET /api/weixin/status`
-    - `GET /api/weixin/account`
-    - `GET /api/weixin/login/status`
-    - `GET /api/weixin/bridge/status`
-    - `POST /api/weixin/api/start`
-    - `POST /api/weixin/api/stop`
-    - `POST /api/weixin/login/start`
-    - `POST /api/weixin/login/confirm`
-    - `POST /api/weixin/bridge/start`
-    - `POST /api/weixin/bridge/stop`
-    - `POST /api/weixin/bridge/restart`
-    - `POST /api/weixin/logout`
-  - added `open` target for the plugin directory
-  - session titles now render `weixin` as `微信`
-  - desktop session fallback labels were cleaned to normal Chinese
-  - added desktop bootstrap-side auto-start for:
-    - weixin API
-    - weixin bridge after login if `autoStartBridge` is enabled
-- Reworked the channel configuration page in `desktop/ui/app.js`:
-  - `微信` now has a dedicated special card instead of a generic form-only card
-  - the card shows:
-    - API running status
-    - login status
-    - bridge status
-    - weixin session count
-    - plugin directory
-    - current logged-in weixin user id
-    - context count
-  - added actions:
-    - start API
-    - stop API
-    - scan login
-    - check login status
-    - start bridge
-    - stop bridge
-    - refresh status
-    - logout
-    - open plugin directory
-  - QR login state is tracked in the frontend and polled until confirmed / expired
-  - QR content is rendered as a scannable image via a generated QR URL
-- Updated `desktop/ui/styles.css` for the new weixin card layout:
-  - status chips
-  - action row
-  - QR login panel
-  - plugin/account meta grid
-  - responsive collapse on narrower widths
-- Small frontend cleanup bundled into the same pass:
-  - header version separator changed from mojibake-style glyphs to `·`
-  - chat page eyebrow labels were partially normalized to Chinese
-  - role labels now use `·` instead of the earlier bad separator glyph
+The old standalone desktop Weixin plugin path is now obsolete in this branch.
 
-## Verification Completed
+- Source of truth:
+  - official built-in Weixin channel in `nanobot/channels/weixin.py`
+  - desktop shell integration in `desktop/backend/nanobot_desktop_backend/weixin_manager.py`
+- Current desktop behavior:
+  - desktop shell reads and writes official Weixin state from `account.json`
+  - QR login is started from the desktop backend and polled directly against the official Weixin API flow
+  - enabling/disabling the Weixin channel now works through `channels.weixin.enabled`
+  - if login state changes while Gateway is running, desktop restarts Gateway so the official channel reloads state
+- Removed from the desktop shell:
+  - standalone plugin install checks
+  - plugin directory entry points
+  - plugin API start/stop endpoints
+  - bridge start/stop endpoints
+  - separate Weixin API / Runtime log sources
+- Current desktop Weixin config fields:
+  - `enabled`
+  - `allowFrom`
+  - `baseUrl`
+  - `routeTag`
+  - `pollTimeout`
+- Current desktop Weixin UI shows:
+  - channel enabled state
+  - login state
+  - Gateway state
+  - runtime state
+  - session count
+  - context count
+  - current Weixin user id / bot id
+
+## 2026-03-27 Verification
 
 - `node --check desktop/ui/app.js`
-- `python -m py_compile desktop/backend/nanobot_desktop_backend/app.py desktop/backend/nanobot_desktop_backend/schemas.py desktop/backend/nanobot_desktop_backend/weixin_manager.py`
+- `python -m py_compile desktop/backend/nanobot_desktop_backend/app.py desktop/backend/nanobot_desktop_backend/weixin_manager.py desktop/backend/nanobot_desktop_backend/schemas.py`
+- local desktop backend `/api/weixin/status` now returns the official structure:
+  - `supported`
+  - `enabled`
+  - `gatewayRunning`
+  - `runtimeState`
+  - `loggedIn`
+  - `account`
+  - `contextCount`
+  - `stateDir`
+  - `note`
+  - `login`
 
-## Still Needs Runtime Verification
+## 2026-03-27 Release Notes
 
-- Desktop app relaunch with the new shell-side weixin integration
-- Confirm the weixin card can:
-  - start the plugin API
-  - generate a QR code
-  - poll until login confirmation
-  - start the bridge after login
-- Confirm the channel page reflects existing weixin sessions from:
-  - `C:\Users\huwei\AppData\Local\NanobotDesktop\workspace\sessions\weixin_*.jsonl`
-
-## 2026-03-22 Follow-up UX Fixes
-
-- Weixin runtime controls were simplified again in `desktop/ui/app.js`:
-  - removed separate manual `启动接口 / 停止接口 / 启动桥接 / 停止桥接` buttons
-  - replaced them with two direct runtime toggles:
-    - `微信接口`
-    - `消息桥接`
-  - toggling now immediately calls the shell-side API start/stop or bridge start/stop actions
-- Channel page no longer participates in the generic polling re-render path:
-  - removed `channels` from the `refreshRuntime()` auto-`renderBody()` tab list
-  - this was done specifically to stop the channel page from jumping back to the top while the user is scrolling or editing
-- Added page-level scroll position persistence in `desktop/ui/app.js`:
-  - `.page-scroll` position is captured before same-tab rerenders
-  - scroll is restored after rerender
-  - this helps all page-frame based screens, including channels / AI / dashboard / skills / logs
-- Chat page entry was tightened:
-  - entering chat now renders immediately and then refreshes chat data
-  - intended to make chat polling feel more stable instead of waiting on the async refresh path
-- Scrollbars are now visually hidden while keeping scrolling enabled:
-  - implemented in `desktop/ui/styles.css`
-  - applied globally via hidden scrollbar rules
-- Added matching responsive layout for the new weixin runtime toggle row in `desktop/ui/styles.css`
-
-## Verification Completed After Follow-up
-
-- `node --check desktop/ui/app.js`
-- `python -m py_compile desktop/backend/nanobot_desktop_backend/app.py desktop/backend/nanobot_desktop_backend/schemas.py desktop/backend/nanobot_desktop_backend/weixin_manager.py`
-
-## 2026-03-22 Weixin Card Simplification
-
-- The weixin channel card was simplified again in `desktop/ui/app.js` to match the latest product requirement:
-  - keep only one main channel toggle: `启用渠道`
-  - remove user-facing runtime toggles for:
-    - weixin API
-    - weixin bridge
-  - remove user-facing plugin config fields from the card body:
-    - port
-    - service/base URL
-    - plugin directory
-    - other shell-only fields
-  - keep only:
-    - channel enabled/disabled
-    - scan login
-    - logout
-    - status chips
-    - current logged-in weixin user
-    - context count
-- New channel-toggle behavior:
-  - enabling `channels.weixin.enabled` now immediately starts the plugin API
-  - if a login token already exists, enabling also starts the bridge automatically
-  - disabling stops bridge + API, but does not forcibly delete the saved login
-  - login confirmation now auto-starts the bridge whenever the weixin channel is enabled
-- Desktop bootstrap behavior in `desktop/backend/nanobot_desktop_backend/app.py` was aligned with this:
-  - startup now only checks `channels.weixin.enabled`
-  - if enabled:
-    - start plugin API
-    - if already logged in, start bridge
-
-## 2026-03-22 Weixin Bridge Stability Fix
-
-- Root cause of `微信操作失败: {"ok":false,"error":"login_not_found"}` was confirmed to be plugin-side process instability, not shell-only state:
-  - plugin login sessions were stored in-memory in `nanobot-weixin-plugin/src/api-server.js`
-  - plugin API used to crash during bridge startup, which dropped the in-memory `loginId`
-- External plugin fix was applied directly in:
-  - `C:\Users\huwei\AppData\Local\NanobotDesktop\workspace\nanobot-weixin-plugin\src\api-server.js`
-- Plugin-side changes:
-  - replaced bridge child launch from `spawn(..., { shell: true })` to direct Node launch via `process.execPath`
-  - fixed Windows plugin cwd resolution by switching to `fileURLToPath(import.meta.url)`
-  - added child-process `error` / `close` handling so bridge startup failure no longer crashes the plugin API
-  - bridge status now writes explicit `running / starting / stoppedAt / lastError / lastExitCode`
-- Verified result after patch:
-  - plugin API stays alive after `POST /api/weixin/bridge/start`
-  - bridge now reaches running state with a live pid
-  - desktop shell now reports `apiRunning: true`, `loggedIn: true`, `bridge.running: true`
-- Shell-side cleanup in `desktop/ui/app.js`:
-  - removed manual `检查登录状态` action from the weixin card
-  - QR polling now handles `login_not_found` gracefully and asks for re-scan instead of surfacing the raw backend error
-  - QR polling no longer throws raw transient errors back to the user during background polling
-  - enabling weixin now avoids redundant `bridge/start` calls when the bridge is already running
-- Local relaunch performed:
-  - stale `cargo tauri dev` / `nanobot-desktop.exe` processes were cleaned up
-  - a fresh hidden `cargo tauri dev --no-watch` instance was started
-  - backend health and desktop shell were confirmed up again
+- `desktop-v0.1.2` was published from this branch.
+- Branch version has already been bumped again to `0.1.3` for the next desktop build.
+- Before triggering another desktop release, only bump version if the same tag already exists.
