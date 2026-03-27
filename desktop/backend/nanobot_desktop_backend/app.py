@@ -41,12 +41,11 @@ from nanobot_desktop_backend.paths import (
     ensure_dirs,
     get_config_path,
     get_data_dir,
-    get_desktop_plugins_dir,
     get_logs_dir,
     get_workspace_dir,
 )
 from nanobot_desktop_backend.schemas import build_schema
-from nanobot_desktop_backend.weixin_manager import WeixinPluginManager
+from nanobot_desktop_backend.weixin_manager import WeixinManager
 
 
 CHANNEL_DISPLAY_NAMES = {
@@ -251,13 +250,13 @@ class DesktopState:
         ensure_dirs()
         ensure_default_config()
         self.gateway = GatewayManager()
-        self.weixin = WeixinPluginManager()
+        self.weixin = WeixinManager()
         self.chat = ChatManager()
         self.schema = build_schema()
         self._maybe_start_gateway()
-        self._maybe_start_weixin()
 
     def bootstrap(self) -> dict[str, Any]:
+        gateway_status = self.gateway.status()
         return {
             "meta": {
                 "appName": "Nanobot Desktop",
@@ -271,8 +270,8 @@ class DesktopState:
             "schema": self.schema,
             "config": dump_runtime_config(),
             "skills": get_skill_inventory(),
-            "status": self.gateway.status(),
-            "weixin": self.weixin.status(),
+            "status": gateway_status,
+            "weixin": self.weixin.status(bool(gateway_status.get("running"))),
         }
 
     def _maybe_start_gateway(self) -> None:
@@ -295,43 +294,13 @@ class DesktopState:
         except Exception:
             logging.getLogger("nanobot_desktop").exception("Failed to auto-start gateway during desktop bootstrap")
 
-    def _maybe_start_weixin(self) -> None:
-        try:
-            cfg = load_runtime_config()
-            weixin_cfg = cfg.get("channels", {}).get("weixin", {})
-            if not isinstance(weixin_cfg, dict):
-                return
-            if weixin_cfg.get("enabled"):
-                status = self.weixin.start_api()
-                if status.get("apiRunning") and status.get("loggedIn"):
-                    try:
-                        self.weixin.proxy_post("/api/weixin/bridge/start")
-                    except Exception:
-                        logging.getLogger("nanobot_desktop").exception("Failed to auto-start weixin bridge")
-        except Exception:
-            logging.getLogger("nanobot_desktop").exception("Failed to auto-start weixin plugin during desktop bootstrap")
-
     def shutdown(self) -> None:
-        logger = logging.getLogger("nanobot_desktop")
-        try:
-            weixin_status = self.weixin.status()
-            if weixin_status.get("apiRunning"):
-                try:
-                    self.weixin.proxy_post("/api/weixin/bridge/stop")
-                except Exception:
-                    logger.exception("Failed to stop weixin bridge during desktop shutdown")
-        except Exception:
-            logger.exception("Failed to inspect weixin status during desktop shutdown")
-
-        try:
-            self.weixin.stop_api()
-        except Exception:
-            logger.exception("Failed to stop weixin api during desktop shutdown")
+        self.weixin.cancel_login()
 
         try:
             self.gateway.stop()
         except Exception:
-            logger.exception("Failed to stop gateway during desktop shutdown")
+            logging.getLogger("nanobot_desktop").exception("Failed to stop gateway during desktop shutdown")
 
 
 class DesktopRequestHandler(BaseHTTPRequestHandler):
@@ -374,17 +343,14 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
             self._json({"ok": True, **load_session_payload(key)})
             return
         if parsed.path == "/api/weixin/status":
-            self._json({"ok": True, "status": self.state.weixin.status()})
-            return
-        if parsed.path == "/api/weixin/account":
-            self._weixin_proxy_get("/api/weixin/account")
+            self._json({"ok": True, "status": self.state.weixin.status(self.state.gateway.status().get("running", False))})
             return
         if parsed.path == "/api/weixin/login/status":
             login_id = parse_qs(parsed.query).get("loginId", [""])[0]
-            self._weixin_proxy_get("/api/weixin/login/status", {"loginId": login_id})
-            return
-        if parsed.path == "/api/weixin/bridge/status":
-            self._weixin_proxy_get("/api/weixin/bridge/status")
+            try:
+                self._json({"ok": True, **self.state.weixin.login_status(login_id)})
+            except RuntimeError as error:
+                self._json({"error": str(error)}, status=HTTPStatus.BAD_REQUEST)
             return
         self._serve_static(parsed.path)
 
@@ -405,32 +371,11 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
             self._json({"ok": True})
             threading.Thread(target=self._shutdown_server, daemon=True).start()
             return
-        if parsed.path == "/api/weixin/api/start":
-            self._json({"ok": True, "status": self.state.weixin.start_api()})
-            return
-        if parsed.path == "/api/weixin/api/stop":
-            self._json({"ok": True, "status": self.state.weixin.stop_api()})
-            return
         if parsed.path == "/api/weixin/login/start":
-            self._weixin_proxy_post("/api/weixin/login/start")
-            return
-        if parsed.path == "/api/weixin/login/confirm":
-            payload = self._read_json_body()
-            if payload is None:
-                return
-            self._weixin_proxy_post("/api/weixin/login/confirm", payload)
-            return
-        if parsed.path == "/api/weixin/bridge/start":
-            self._weixin_proxy_post("/api/weixin/bridge/start")
-            return
-        if parsed.path == "/api/weixin/bridge/stop":
-            self._weixin_proxy_post("/api/weixin/bridge/stop")
-            return
-        if parsed.path == "/api/weixin/bridge/restart":
-            self._weixin_proxy_post("/api/weixin/bridge/restart")
+            self._json({"ok": True, **self.state.weixin.start_login()})
             return
         if parsed.path == "/api/weixin/logout":
-            self._weixin_proxy_post("/api/weixin/logout")
+            self._json({"ok": True, "status": self.state.weixin.logout()})
             return
         if parsed.path == "/api/gateway/start":
             self._json({"ok": True, "status": self.state.gateway.start()})
@@ -536,7 +481,6 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
                 "logs": get_logs_dir(),
                 "workspace": get_workspace_dir(),
                 "skills": get_workspace_skills_dir(),
-                "weixinPlugin": get_desktop_plugins_dir(),
             }.get(target_name)
             if not target:
                 self._json({"error": "unsupported_target"}, status=HTTPStatus.BAD_REQUEST)
@@ -579,22 +523,6 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
             self._json({"error": "invalid_json"}, status=HTTPStatus.BAD_REQUEST)
             return None
 
-    def _weixin_proxy_get(self, path: str, query: dict[str, Any] | None = None) -> None:
-        try:
-            self._json(self.state.weixin.proxy_get(path, query))
-        except RuntimeError as error:
-            self._json({"error": str(error)}, status=HTTPStatus.BAD_REQUEST)
-        except Exception as error:
-            self._json({"error": str(error)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
-
-    def _weixin_proxy_post(self, path: str, payload: dict[str, Any] | None = None) -> None:
-        try:
-            self._json(self.state.weixin.proxy_post(path, payload))
-        except RuntimeError as error:
-            self._json({"error": str(error)}, status=HTTPStatus.BAD_REQUEST)
-        except Exception as error:
-            self._json({"error": str(error)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
-
     def _read_logs(self, raw_query: str) -> dict[str, Any]:
         query = parse_qs(raw_query)
         name = query.get("name", ["all"])[0]
@@ -634,8 +562,6 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
         explicit_entries = {
             "desktop": {"name": "desktop", "label": "Desktop", "path": logs_dir / "desktop.log"},
             "gateway": {"name": "gateway", "label": "Gateway", "path": logs_dir / "gateway.log"},
-            "weixin-api": {"name": "weixin-api", "label": "Weixin API", "path": logs_dir / "weixin-api.log"},
-            "weixin-runtime": {"name": "weixin-runtime", "label": "Weixin Runtime", "path": self.state.weixin.plugin_dir / "state" / "runtime.log"},
         }
         if name == "all":
             entries = list(explicit_entries.values())
@@ -720,7 +646,7 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("", encoding="utf-8")
                 cleared.append(str(path))
-            for item in ("desktop", "gateway", "weixin-api"):
+            for item in ("desktop", "gateway"):
                 for archive in get_logs_dir().glob(f"{item}.*.log"):
                     archive.unlink(missing_ok=True)
                     cleared.append(str(archive))

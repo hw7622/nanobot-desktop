@@ -160,6 +160,7 @@ async function refreshBootstrap() {
   ensureDesktopConfig(state.bootstrap.config);
   ensureDesktopConfig(state.draft);
   state.provider = state.draft.agents.defaults.provider || "openrouter";
+  applyWeixinStatus(payload.weixin || {});
   await refreshLogs();
   await refreshSessions();
   if (!state.selectedSessionKey && state.sessions.length) state.selectedSessionKey = defaultSessionKey(state.sessions);
@@ -175,12 +176,12 @@ async function refreshRuntime() {
     state.bootstrap.meta = payload.meta;
     state.bootstrap.skills = payload.skills;
     state.bootstrap.config = payload.config;
-    state.bootstrap.weixin = payload.weixin;
     ensureDesktopConfig(state.bootstrap.config);
+    applyWeixinStatus(payload.weixin || {});
     await refreshLogs();
     renderHeader();
     if (state.tab === "logs") updateLogsView();
-    else if (["dashboard", "skills"].includes(state.tab)) renderBody();
+    else if (["dashboard", "skills", "channels"].includes(state.tab)) renderBody();
   } catch (error) {
     state.bootstrapError = `状态刷新失败：${error.message || error}`;
     renderHeader();
@@ -399,6 +400,7 @@ async function gatewayAction(action, renderAfter = true) {
   try {
     const payload = await fetchJson(`/api/gateway/${action}`, { method: "POST" });
     state.bootstrap.status = payload.status;
+    await refreshWeixinStatus(false);
     await refreshLogs();
     if (action === "restart" || action === "start") {
       state.restartRecommended = false;
@@ -412,6 +414,21 @@ async function gatewayAction(action, renderAfter = true) {
     state.gatewayBusy = "";
   }
   if (renderAfter) render();
+}
+
+async function persistDraftConfig() {
+  const payload = await fetchJson("/api/config", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(state.draft),
+  });
+  state.bootstrap.config = payload.config;
+  state.bootstrap.skills = payload.skills;
+  state.draft = clone(payload.config);
+  ensureDesktopConfig(state.bootstrap.config);
+  ensureDesktopConfig(state.draft);
+  ensurePollingStarted();
+  return payload;
 }
 
 async function checkUpdates() {
@@ -537,28 +554,25 @@ function qrImageUrl(value) {
 
 async function refreshWeixinStatus(renderAfter = true) {
   const payload = await fetchJson("/api/weixin/status");
-  if (state.bootstrap) state.bootstrap.weixin = payload.status || {};
+  applyWeixinStatus(payload.status || {});
   if (renderAfter) renderBody();
 }
 
-function describeWeixinStartFailure(status) {
-  const note = String(status?.note || "").trim();
-  const logPath = String(status?.apiLogPath || "").trim();
-  const parts = [];
-  if (note) parts.push(note);
-  if (logPath) parts.push(`日志：${logPath}`);
-  return parts.join("；") || "微信插件接口启动失败。";
+function applyWeixinStatus(status) {
+  const nextStatus = status && typeof status === "object" ? status : {};
+  if (state.bootstrap) state.bootstrap.weixin = nextStatus;
+  const login = nextStatus.login && typeof nextStatus.login === "object" ? clone(nextStatus.login) : null;
+  state.weixinLogin = login;
+  if (login && ["pending", "scanned"].includes(login.status)) startWeixinLoginPolling();
+  else stopWeixinLoginPolling();
 }
 
-async function ensureWeixinApiReady() {
-  if (!state.bootstrap.weixin?.apiRunning) {
-    const payload = await fetchJson("/api/weixin/api/start", { method: "POST" });
-    if (state.bootstrap) state.bootstrap.weixin = payload.status || {};
-    await refreshWeixinStatus(false);
-  }
-  if (!state.bootstrap.weixin?.apiRunning) {
-    throw new Error(describeWeixinStartFailure(state.bootstrap.weixin));
-  }
+function weixinStateText(status) {
+  const current = status && typeof status === "object" ? status : {};
+  if (current.runtimeState) return current.runtimeState;
+  if (current.loggedIn && current.enabled) return "待启动";
+  if (current.enabled) return "待登录";
+  return "未启用";
 }
 
 async function clearSelectedSession() {
@@ -622,42 +636,25 @@ async function weixinAction(action, payload = null) {
   state.weixinBusy = action;
   renderBody();
   try {
-    if (action === "startApi") {
-      await fetchJson("/api/weixin/api/start", { method: "POST" });
-      await refreshWeixinStatus(false);
-      if (!state.bootstrap.weixin?.apiRunning) throw new Error(describeWeixinStartFailure(state.bootstrap.weixin));
-      state.lastSaveMessage = "微信接口已启动。";
-    } else if (action === "stopApi") {
-      await fetchJson("/api/weixin/api/stop", { method: "POST" });
-      stopWeixinLoginPolling();
-      state.weixinLogin = null;
-      await refreshWeixinStatus(false);
-      state.lastSaveMessage = "微信接口已停止。";
-    } else if (action === "startLogin") {
-      await ensureWeixinApiReady();
+    if (action === "startLogin") {
       const result = await fetchJson("/api/weixin/login/start", { method: "POST" });
-      state.weixinLogin = {
-        loginId: result.loginId,
-        qrcode: result.qrcode,
-        qrUrl: result.qrUrl,
-        status: result.status || "pending",
-      };
+      state.weixinLogin = { ...result, status: result.status || "pending" };
       startWeixinLoginPolling();
-      state.lastSaveMessage = "已生成微信二维码。";
-    } else if (action === "startBridge") {
-      await fetchJson("/api/weixin/bridge/start", { method: "POST" });
-      await refreshWeixinStatus(false);
-      state.lastSaveMessage = "微信桥接已启动。";
-    } else if (action === "stopBridge") {
-      await fetchJson("/api/weixin/bridge/stop", { method: "POST" });
-      await refreshWeixinStatus(false);
-      state.lastSaveMessage = "微信桥接已停止。";
+      state.lastSaveMessage = result.qrUrl ? "已生成微信二维码。" : "正在生成微信二维码...";
     } else if (action === "logout") {
       await fetchJson("/api/weixin/logout", { method: "POST" });
       stopWeixinLoginPolling();
       state.weixinLogin = null;
       await refreshWeixinStatus(false);
-      state.lastSaveMessage = "微信登录状态已清空。";
+      if ((state.draft.channels.weixin || {}).enabled && state.bootstrap.status.running) {
+        await gatewayAction("restart", false);
+        await refreshWeixinStatus(false);
+        state.lastSaveMessage = state.bootstrap.status.running
+          ? "微信已退出登录，并已重启 Gateway。"
+          : "微信已退出登录，但 Gateway 重启失败，请手动处理。";
+      } else {
+        state.lastSaveMessage = "微信登录状态已清空。";
+      }
     } else if (action === "refresh") {
       await refreshWeixinStatus(false);
     }
@@ -687,42 +684,44 @@ function stopWeixinLoginPolling() {
 }
 
 async function syncWeixinEnabled(enabled) {
-  if (state.weixinBusy) return;
-  if (enabled && !state.bootstrap.weixin?.installed) {
-    window.alert("未检测到微信插件。请先安装微信插件，再启用微信渠道。");
-    renderBody();
-    return;
-  }
+  if (state.weixinBusy || !state.draft) return;
+  const previousDraft = clone(state.draft);
   applyValue("channels.weixin.enabled", enabled);
   renderHeader();
   renderBody();
   state.weixinBusy = enabled ? "enable" : "disable";
   renderBody();
   try {
-    if (enabled) {
-      await ensureWeixinApiReady();
-      if (state.bootstrap.weixin?.loggedIn && !state.bootstrap.weixin?.bridge?.running) {
-        await fetchJson("/api/weixin/bridge/start", { method: "POST" });
-        await refreshWeixinStatus(false);
-        state.lastSaveMessage = "微信渠道已开启。";
+    await persistDraftConfig();
+    await refreshWeixinStatus(false);
+
+    const gatewayWasRunning = Boolean(state.bootstrap.status.running);
+    if (gatewayWasRunning) {
+      await gatewayAction("restart", false);
+      await refreshWeixinStatus(false);
+      if (state.bootstrap.status.running) {
+        if (enabled) {
+          state.lastSaveMessage = state.bootstrap.weixin?.loggedIn
+            ? "微信渠道已开启，并已重启 Gateway 生效。"
+            : "微信渠道已开启，但尚未登录；登录后再重启 Gateway 即可接收消息。";
+        } else {
+          state.lastSaveMessage = "微信渠道已关闭，并已重启 Gateway 生效。";
+        }
       } else {
-        state.lastSaveMessage = state.bootstrap.weixin?.apiRunning ? "微信接口已启动，请扫码登录。" : "微信渠道启用失败。";
+        state.lastSaveMessage = enabled
+          ? "微信渠道已保存，但 Gateway 重启失败，请手动启动或检查日志。"
+          : "微信渠道已关闭，但 Gateway 重启失败，请手动检查日志。";
       }
     } else {
-      stopWeixinLoginPolling();
-      state.weixinLogin = null;
-      try {
-        await fetchJson("/api/weixin/bridge/stop", { method: "POST" });
-      } catch {}
-      try {
-        await fetchJson("/api/weixin/api/stop", { method: "POST" });
-      } catch {}
-      await refreshWeixinStatus(false);
-      state.lastSaveMessage = "微信渠道已关闭。";
+      state.lastSaveMessage = enabled
+        ? (state.bootstrap.weixin?.loggedIn
+          ? "微信渠道已开启。启动 Gateway 后生效。"
+          : "微信渠道已开启。请先扫码登录，再启动 Gateway。")
+        : "微信渠道已关闭。下次启动 Gateway 时不会加载微信。";
     }
   } catch (error) {
-    applyValue("channels.weixin.enabled", !enabled);
-    await refreshWeixinStatus(false);
+    state.draft = previousDraft;
+    ensureDesktopConfig(state.draft);
     window.alert(`微信渠道切换失败：${error.message || error}`);
   } finally {
     state.weixinBusy = "";
@@ -761,19 +760,33 @@ async function pollWeixinLoginOnce() {
     return;
   }
   const status = payload.status || "pending";
-  state.weixinLogin = { ...state.weixinLogin, status };
+  state.weixinLogin = { ...state.weixinLogin, ...payload, status };
   if (status === "confirmed") {
     await refreshWeixinStatus(false);
-    state.lastSaveMessage = "微信已登录。";
     stopWeixinLoginPolling();
-    if ((state.draft.channels.weixin || {}).enabled && !state.bootstrap.weixin?.bridge?.running) {
-      await fetchJson("/api/weixin/bridge/start", { method: "POST" });
+    if ((state.draft.channels.weixin || {}).enabled && state.bootstrap.status.running) {
+      await gatewayAction("restart", false);
       await refreshWeixinStatus(false);
-      state.lastSaveMessage = "微信已登录，并已自动启动桥接。";
+      state.lastSaveMessage = state.bootstrap.status.running
+        ? "微信已登录，并已重启 Gateway 生效。"
+        : "微信已登录，但 Gateway 重启失败，请手动处理。";
+    } else if ((state.draft.channels.weixin || {}).enabled) {
+      state.lastSaveMessage = "微信已登录。启动 Gateway 后即可生效。";
+    } else {
+      state.lastSaveMessage = "微信已登录。启用微信渠道后再启动或重启 Gateway 即可生效。";
     }
   } else if (status === "expired") {
     state.lastSaveMessage = "二维码已过期，请重新生成。";
     stopWeixinLoginPolling();
+  } else if (status === "failed") {
+    state.lastSaveMessage = payload.error || "微信登录失败，请重试。";
+    stopWeixinLoginPolling();
+  } else if (status === "cancelled") {
+    state.lastSaveMessage = "微信登录已取消。";
+    stopWeixinLoginPolling();
+  } else if (status === "scanned") {
+    state.lastSaveMessage = "已扫码，请在手机上确认登录。";
+    startWeixinLoginPolling();
   } else {
     startWeixinLoginPolling();
   }
@@ -791,7 +804,7 @@ async function copyLogs() {
 }
 
 async function clearLogs() {
-  if (!window.confirm("确定清空当前实时日志吗？这会清空 Gateway、Desktop、Weixin API 和 Weixin Runtime 日志。")) return;
+  if (!window.confirm("确定清空当前实时日志吗？这会清空 Gateway 和 Desktop 日志。")) return;
   await fetchJson("/api/logs/clear", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1029,7 +1042,6 @@ function pageDashboard() {
             <button class="button" data-open-target="workspace">打开工作区</button>
             <button class="button" data-open-target="logs">打开日志目录</button>
             <button class="button" data-open-target="skills">打开 Skills 目录</button>
-            <button class="button" data-open-target="weixinPlugin">打开插件目录</button>
           </div>
         </article>
         <article class="panel stack-card dashboard-card">
@@ -1308,9 +1320,7 @@ function pageChannels() {
   const channels = state.bootstrap.schema.channels || [];
   const enabled = channels.filter((channel) => (state.draft.channels[channel.key] || channel.defaultConfig || {}).enabled).length;
   const weixin = state.bootstrap.weixin || {};
-  const weixinStatus = !weixin.installed
-    ? "未安装插件"
-    : (weixin.loggedIn ? "已登录" : (weixin.apiRunning ? "待登录" : "未启动"));
+  const weixinStatus = weixinStateText(weixin);
   return pageFrame(`
     <div class="page-stack page-scroll-stack workspace-page">
       <section class="workspace-hero">
@@ -1366,8 +1376,6 @@ function pageLogs() {
   const sources = [
     { key: "all", label: "全部" },
     { key: "gateway", label: "Gateway" },
-    { key: "weixin-runtime", label: "微信 Runtime" },
-    { key: "weixin-api", label: "微信 API" },
     { key: "desktop", label: "Desktop" },
   ];
   return `
@@ -1499,13 +1507,14 @@ function renderChannelCard(channel) {
 }
 
 function renderWeixinChannelCard(channel, cfg, fields, expanded, configuredCount) {
-  const plugin = state.bootstrap.weixin || {};
-  const installed = Boolean(plugin.installed);
+  const weixin = state.bootstrap.weixin || {};
   const sessions = state.sessions.filter((item) => item.channel === "weixin");
   const login = state.weixinLogin;
   const qrImage = login?.qrUrl ? qrImageUrl(login.qrUrl) : "";
-  const channelState = !installed ? "未安装插件" : (plugin.loggedIn ? "已登录" : (plugin.apiRunning ? "待登录" : "未启动"));
-  const bridgeState = !plugin.apiRunning ? "未运行" : (!plugin.loggedIn ? "待登录" : (plugin.bridge?.running ? "运行中" : "已停止"));
+  const channelState = weixinStateText(weixin);
+  const loginState = login?.status === "scanned"
+    ? "待确认"
+    : (weixin.loggedIn ? "已登录" : (login?.status === "pending" ? "扫码中" : "未登录"));
   return `
     <article class="channel-card channel-accordion ${cfg.enabled ? "" : "disabled"} ${expanded ? "open" : ""}">
       <button class="channel-accordion-head" type="button" data-toggle-channel="${escAttr(channel.key)}" aria-expanded="${expanded ? "true" : "false"}">
@@ -1528,24 +1537,23 @@ function renderWeixinChannelCard(channel, cfg, fields, expanded, configuredCount
           </label>
         </div>
         <div class="weixin-status-grid">
-          <div class="status-chip-card"><span>插件</span><strong>${installed ? "已安装" : "未安装"}</strong></div>
           <div class="status-chip-card"><span>渠道</span><strong>${cfg.enabled ? "已开启" : "已关闭"}</strong></div>
-          <div class="status-chip-card"><span>接口</span><strong>${plugin.apiRunning ? "运行中" : "未运行"}</strong></div>
-          <div class="status-chip-card"><span>登录</span><strong>${plugin.loggedIn ? "已登录" : "未登录"}</strong></div>
-          <div class="status-chip-card"><span>桥接</span><strong>${bridgeState}</strong></div>
+          <div class="status-chip-card"><span>登录</span><strong>${loginState}</strong></div>
+          <div class="status-chip-card"><span>Gateway</span><strong>${weixin.gatewayRunning ? "运行中" : "未运行"}</strong></div>
+          <div class="status-chip-card"><span>运行态</span><strong>${esc(channelState)}</strong></div>
           <div class="status-chip-card"><span>会话</span><strong>${sessions.length}</strong></div>
+          <div class="status-chip-card"><span>上下文</span><strong>${esc(String(weixin.contextCount || 0))}</strong></div>
         </div>
         <div class="weixin-action-row">
-          <button class="button button-primary" id="startWeixinLoginBtn" ${(!installed || !cfg.enabled || state.weixinBusy) ? "disabled" : ""}>扫码登录</button>
-          <button class="button" id="logoutWeixinBtn" ${(!installed || !plugin.loggedIn || state.weixinBusy) ? "disabled" : ""}>退出登录</button>
+          <button class="button button-primary" id="startWeixinLoginBtn" ${state.weixinBusy ? "disabled" : ""}>${login?.status === "pending" || login?.status === "scanned" ? "刷新二维码" : "扫码登录"}</button>
+          <button class="button" id="logoutWeixinBtn" ${(!weixin.loggedIn || state.weixinBusy) ? "disabled" : ""}>退出登录</button>
         </div>
-        ${!installed ? `<p class="muted">未检测到微信插件，请先在工作区安装微信插件后再启用该渠道。</p>` : ""}
         ${(login && login.qrUrl) ? `
         <section class="weixin-login-panel">
           <div class="weixin-login-copy">
             <p class="eyebrow">微信扫码</p>
             <h5>${esc(login.status === "scanned" ? "已扫码，等待手机确认" : login.status === "confirmed" ? "登录成功" : "请使用微信扫码")}</h5>
-            <p class="muted">${esc(login.status === "confirmed" ? "当前账号已写入插件状态。" : "二维码过期后重新点一次扫码登录即可。")}</p>
+            <p class="muted">${esc(login.status === "confirmed" ? "当前账号已写入官方微信状态。" : "二维码过期后重新点一次扫码登录即可。")}</p>
             <div class="weixin-login-actions">
               <button class="button button-ghost" id="copyWeixinQrBtn">复制二维码内容</button>
             </div>
@@ -1555,10 +1563,11 @@ function renderWeixinChannelCard(channel, cfg, fields, expanded, configuredCount
           </div>
         </section>
         ` : ""}
-        ${plugin.note ? `<p class="muted">${esc(plugin.note)}</p>` : ""}
+        ${weixin.note ? `<p class="muted">${esc(weixin.note)}</p>` : ""}
+        <div class="form-grid channel-form-grid">${renderFields(cfg, fields, "channels.weixin")}</div>
         <div class="weixin-meta-list">
-          <div class="weixin-meta-item"><span>当前微信</span><strong title="${escAttr(plugin.account?.userId || "未登录")}">${esc(shortPath(plugin.account?.userId || "未登录"))}</strong></div>
-          <div class="weixin-meta-item"><span>上下文</span><strong>${esc(String(plugin.contextCount || 0))}</strong></div>
+          <div class="weixin-meta-item"><span>当前微信</span><strong title="${escAttr(weixin.account?.userId || "未登录")}">${esc(shortPath(weixin.account?.userId || "未登录"))}</strong></div>
+          <div class="weixin-meta-item"><span>Bot ID</span><strong title="${escAttr(weixin.account?.botId || "未登录")}">${esc(shortPath(weixin.account?.botId || "未登录"))}</strong></div>
         </div>
       </div>
       ` : ""}
@@ -2141,8 +2150,6 @@ function logStatusText() {
   const source = {
     all: "全部",
     gateway: "Gateway",
-    "weixin-runtime": "微信 Runtime",
-    "weixin-api": "微信 API",
     desktop: "Desktop",
   }[state.logSource || "all"] || (state.logSource || "all");
   return `${source} · ${follow} · ${state.logLineCount} 行 · 文件更新 ${updated} · 刷新 ${refreshed}${paused}`;

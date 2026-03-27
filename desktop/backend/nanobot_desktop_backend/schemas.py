@@ -42,11 +42,9 @@ CHANNEL_DEFAULTS = {
     "weixin": {
         "enabled": False,
         "allowFrom": ["*"],
-        "apiPort": 31966,
         "baseUrl": "https://ilinkai.weixin.qq.com",
-        "pluginDir": "",
-        "autoStartApi": False,
-        "autoStartBridge": False,
+        "routeTag": "",
+        "pollTimeout": 35,
     },
     "feishu": {
         "enabled": False,
@@ -120,13 +118,11 @@ CHANNEL_FIELD_META = {
         },
     ],
     "weixin": [
-        {"key": "enabled", "label": "启用微信插件", "type": "toggle"},
+        {"key": "enabled", "label": "启用微信", "type": "toggle"},
         {"key": "allowFrom", "label": "允许访问的用户", "type": "list", "placeholder": "* 表示允许所有联系人"},
-        {"key": "apiPort", "label": "本地接口端口", "type": "number"},
         {"key": "baseUrl", "label": "微信服务地址", "type": "text"},
-        {"key": "pluginDir", "label": "插件目录", "type": "text", "placeholder": "留空则自动使用默认目录"},
-        {"key": "autoStartApi", "label": "打开桌面时自动启动微信接口", "type": "toggle"},
-        {"key": "autoStartBridge", "label": "登录后自动启动桥接", "type": "toggle"},
+        {"key": "routeTag", "label": "路由标签", "type": "text", "placeholder": "留空使用默认路由"},
+        {"key": "pollTimeout", "label": "轮询超时(秒)", "type": "number"},
     ],
     "feishu": [
         {"key": "enabled", "label": "启用飞书", "type": "toggle"},
