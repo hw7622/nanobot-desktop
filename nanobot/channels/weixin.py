@@ -980,8 +980,8 @@ def _encrypt_aes_ecb(data: bytes, aes_key_b64: str) -> bytes:
 
         cipher = AES.new(key, AES.MODE_ECB)
         return cipher.encrypt(padded)
-    except ImportError:
-        pass
+    except Exception as e:
+        logger.debug("PyCryptodome AES unavailable for encryption, falling back: {}", e)
 
     try:
         from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -1009,9 +1009,9 @@ def _decrypt_aes_ecb(data: bytes, aes_key_b64: str) -> bytes:
         from Crypto.Cipher import AES
 
         cipher = AES.new(key, AES.MODE_ECB)
-        return cipher.decrypt(data)  # pycryptodome auto-strips PKCS7 with unpad
-    except ImportError:
-        pass
+        return cipher.decrypt(data)
+    except Exception as e:
+        logger.debug("PyCryptodome AES unavailable for decryption, falling back: {}", e)
 
     try:
         from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes

@@ -55,6 +55,8 @@ def build_command() -> list[str]:
         f"{ROOT / 'nanobot' / '__init__.py'};nanobot",
         "--collect-data",
         "tiktoken",
+        "--collect-binaries",
+        "Crypto",
     ]
 
     for hidden in hidden_imports:
