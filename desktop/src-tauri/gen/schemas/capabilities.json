@@ -1,1 +1,1 @@
-{}
+{"main-window-remote-dev":{"identifier":"main-window-remote-dev","description":"Allow the main dev window loaded from the local desktop backend to use Tauri IPC.","local":true,"windows":["main"],"permissions":["core:default","updater:default"]}}

@@ -28,15 +28,16 @@ def main() -> int:
     config_path = args.config.resolve()
 
     endpoint = os.environ.get("NANOBOT_DESKTOP_UPDATER_ENDPOINT", DEFAULT_ENDPOINT).strip()
-    pubkey = os.environ.get("NANOBOT_DESKTOP_UPDATER_PUBKEY", "").strip()
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    existing_pubkey = str(config.get("plugins", {}).get("updater", {}).get("pubkey", "")).strip()
+    pubkey = os.environ.get("NANOBOT_DESKTOP_UPDATER_PUBKEY", "").strip() or existing_pubkey
 
     if not pubkey or "PLACEHOLDER" in pubkey:
         raise SystemExit(
-            "Missing NANOBOT_DESKTOP_UPDATER_PUBKEY. "
-            "Set the real updater public key before building a release."
+            "Missing updater public key. "
+            "Set NANOBOT_DESKTOP_UPDATER_PUBKEY or write the real public key into tauri.conf.json."
         )
 
-    config = json.loads(config_path.read_text(encoding="utf-8"))
     config.setdefault("bundle", {})["createUpdaterArtifacts"] = True
     config.setdefault("plugins", {})["updater"] = {
         "endpoints": [endpoint],

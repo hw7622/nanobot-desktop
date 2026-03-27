@@ -13,16 +13,13 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 #[cfg(windows)]
-use std::ffi::OsStr;
-#[cfg(windows)]
 use std::os::windows::process::CommandExt;
-#[cfg(windows)]
-use std::os::windows::ffi::OsStrExt;
 
 const DEFAULT_UPDATE_ENDPOINT: &str = "https://github.com/hw7622/nanobot-desktop/releases/latest/download/latest.json";
 const DEFAULT_UPDATE_CHANNEL: &str = "stable";
 const UPDATE_ENDPOINT_OVERRIDE: Option<&str> = option_env!("NANOBOT_DESKTOP_UPDATER_ENDPOINT");
 const UPDATE_PUBKEY: Option<&str> = option_env!("NANOBOT_DESKTOP_UPDATER_PUBKEY");
+const EMBEDDED_UPDATE_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUxMUU1NTUzN0E1MzUwQzIKUldUQ1VGTjZVMVVlNGVyMUoxblIvZGovM0I4aE1XRFVQUE4xZ2dCUU0ydUxqSVplNmdnUXlaWWwK";
 #[cfg(windows)]
 const AUTO_LAUNCH_REG_PATH: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 #[cfg(windows)]
@@ -38,11 +35,6 @@ struct BackendChild(Mutex<Option<Child>>);
 struct PendingUpdate(Mutex<Option<Update>>);
 struct ExitRequested(Mutex<bool>);
 
-enum CloseAction {
-    MinimizeToTray,
-    ExitApp,
-    Cancel,
-}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -154,6 +146,32 @@ async fn set_autostart(enabled: bool) -> Result<AutoLaunchPayload, String> {
     Ok(read_auto_launch_state())
 }
 
+#[tauri::command]
+fn handle_close_action(
+    action: String,
+    app: tauri::AppHandle,
+    exit_requested: tauri::State<'_, ExitRequested>,
+) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "未找到主窗口".to_string())?;
+
+    match action.as_str() {
+        "minimize" => window.hide().map_err(|err| err.to_string())?,
+        "exit" => {
+            if let Ok(mut flag) = exit_requested.0.lock() {
+                *flag = true;
+            }
+            request_backend_shutdown();
+            window.close().map_err(|err| err.to_string())?;
+        }
+        "cancel" => {}
+        _ => return Err("未知关闭操作".to_string()),
+    }
+
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(BackendChild(Mutex::new(None)))
@@ -195,42 +213,38 @@ fn main() {
             check_for_updates,
             install_update,
             autostart_status,
-            set_autostart
+            set_autostart,
+            handle_close_action
         ])
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let exit_requested = window.state::<ExitRequested>();
-                if exit_requested.0.lock().map(|flag| *flag).unwrap_or(false) {
-                    request_backend_shutdown();
-                    return;
-                }
-
-                api.prevent_close();
-                match prompt_close_action() {
-                    CloseAction::MinimizeToTray => {
-                        let _ = window.hide();
-                    }
-                    CloseAction::ExitApp => {
-                        if let Ok(mut flag) = exit_requested.0.lock() {
-                            *flag = true;
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    let exit_requested = window
+                        .state::<ExitRequested>()
+                        .0
+                        .lock()
+                        .map(|flag| *flag)
+                        .unwrap_or(false);
+                    if !exit_requested {
+                        api.prevent_close();
+                        if let Some(webview) = window.app_handle().get_webview_window("main") {
+                            let _ = webview.eval(close_prompt_script());
                         }
-                        request_backend_shutdown();
-                        let _ = window.close();
                     }
-                    CloseAction::Cancel => {}
                 }
-            }
-            if matches!(event, tauri::WindowEvent::Destroyed) {
-                request_backend_shutdown();
-                let state = window.state::<BackendChild>();
-                let mut slot = match state.0.lock() {
-                    Ok(slot) => slot,
-                    Err(_) => return,
-                };
-                if let Some(child) = slot.as_mut() {
-                    let _ = child.kill();
+                tauri::WindowEvent::Destroyed => {
+                    request_backend_shutdown();
+                    let state = window.state::<BackendChild>();
+                    let mut slot = match state.0.lock() {
+                        Ok(slot) => slot,
+                        Err(_) => return,
+                    };
+                    if let Some(child) = slot.as_mut() {
+                        let _ = child.kill();
+                    }
+                    *slot = None;
                 }
-                *slot = None;
+                _ => {}
             }
         })
         .run(tauri::generate_context!())
@@ -286,48 +300,6 @@ fn show_main_window<R: tauri::Runtime, M: tauri::Manager<R>>(manager: &M) -> tau
     Ok(())
 }
 
-#[cfg(windows)]
-fn prompt_close_action() -> CloseAction {
-    const MB_YESNOCANCEL: u32 = 0x0000_0003;
-    const MB_ICONQUESTION: u32 = 0x0000_0020;
-    const IDYES: i32 = 6;
-    const IDNO: i32 = 7;
-
-    unsafe extern "system" {
-        fn MessageBoxW(hwnd: *mut core::ffi::c_void, text: *const u16, caption: *const u16, typ: u32) -> i32;
-    }
-
-    let message = to_wide("关闭窗口时如何处理？\n\n是：最小化到托盘并继续后台运行\n否：直接关闭程序\n取消：返回当前窗口");
-    let caption = to_wide("Nanobot Desktop");
-    let result = unsafe {
-        MessageBoxW(
-            std::ptr::null_mut(),
-            message.as_ptr(),
-            caption.as_ptr(),
-            MB_YESNOCANCEL | MB_ICONQUESTION,
-        )
-    };
-
-    match result {
-        IDYES => CloseAction::MinimizeToTray,
-        IDNO => CloseAction::ExitApp,
-        _ => CloseAction::Cancel,
-    }
-}
-
-#[cfg(not(windows))]
-fn prompt_close_action() -> CloseAction {
-    CloseAction::ExitApp
-}
-
-#[cfg(windows)]
-fn to_wide(value: &str) -> Vec<u16> {
-    OsStr::new(value)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
-}
-
 fn request_backend_shutdown() {
     let mut addrs = match ("127.0.0.1", 18791).to_socket_addrs() {
         Ok(addrs) => addrs,
@@ -354,6 +326,58 @@ fn request_backend_shutdown() {
     let _ = stream.read(&mut buffer);
 }
 
+fn close_prompt_script() -> &'static str {
+    r#"
+(() => {
+  const existing = document.getElementById('__nanobotClosePrompt');
+  if (existing) return;
+  const wrap = document.createElement('div');
+  wrap.id = '__nanobotClosePrompt';
+  wrap.style.position = 'fixed';
+  wrap.style.inset = '0';
+  wrap.style.zIndex = '2147483647';
+  wrap.style.display = 'grid';
+  wrap.style.placeItems = 'center';
+  wrap.style.padding = '24px';
+  wrap.style.background = 'rgba(15, 23, 42, 0.34)';
+  wrap.style.backdropFilter = 'blur(6px)';
+  wrap.innerHTML = `
+    <section style="width:min(460px,calc(100vw - 32px));display:grid;gap:12px;padding:24px;border:1px solid rgba(226,232,240,0.9);border-radius:24px;background:rgba(255,255,255,0.98);box-shadow:0 24px 60px rgba(15,23,42,0.2);font-family:'Microsoft YaHei UI',sans-serif;">
+      <p style="margin:0;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#64748b;">窗口关闭</p>
+      <h3 style="margin:0;font-size:24px;line-height:1.2;color:#0f172a;">选择“最小化”还是“关闭”</h3>
+      <p style="margin:0;color:#475569;line-height:1.6;">最小化会继续在托盘后台运行；关闭会直接退出桌面端。</p>
+      <div style="display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;margin-top:4px;">
+        <button data-action="minimize" style="border:0;border-radius:999px;padding:10px 16px;background:#0f766e;color:#fff;font:inherit;cursor:pointer;">最小化</button>
+        <button data-action="exit" style="border:1px solid #cbd5e1;border-radius:999px;padding:10px 16px;background:#fff;color:#0f172a;font:inherit;cursor:pointer;">关闭</button>
+        <button data-action="cancel" style="border:1px solid #cbd5e1;border-radius:999px;padding:10px 16px;background:#fff;color:#64748b;font:inherit;cursor:pointer;">取消</button>
+      </div>
+    </section>
+  `;
+  const remove = () => wrap.remove();
+  wrap.addEventListener('click', (event) => {
+    if (event.target === wrap) remove();
+  });
+  for (const button of wrap.querySelectorAll('[data-action]')) {
+    button.addEventListener('click', async () => {
+      const action = button.getAttribute('data-action');
+      remove();
+      try {
+        if (window.__NANOBOT_SUBMIT_CLOSE_ACTION__) {
+          await window.__NANOBOT_SUBMIT_CLOSE_ACTION__(action);
+          return;
+        }
+        if (action === 'cancel') return;
+        await window.__TAURI__?.core?.invoke?.('handle_close_action', { action });
+      } catch (error) {
+        alert(`关闭操作失败：${error?.message || error}`);
+      }
+    });
+  }
+  document.body.appendChild(wrap);
+})();
+"#
+}
+
 fn build_update_status(app: &tauri::AppHandle, pending: Option<UpdatePayload>) -> UpdateConfigPayload {
     let settings = updater_settings();
     UpdateConfigPayload {
@@ -365,9 +389,9 @@ fn build_update_status(app: &tauri::AppHandle, pending: Option<UpdatePayload>) -
         current_version: app.package_info().version.to_string(),
         pending,
         note: if settings.pubkey.is_some() {
-            "更新源已配置，可检查 GitHub Release 中的新版本。".to_string()
+            "已配置更新签名，可手动检查 GitHub Release 中的新版本。".to_string()
         } else {
-            "尚未配置 updater 公钥。先生成签名密钥并在构建时注入 NANOBOT_DESKTOP_UPDATER_PUBKEY，随后才能真正启用自动更新。".to_string()
+            "未找到更新签名公钥，当前无法检查更新。".to_string()
         },
     }
 }
@@ -546,7 +570,30 @@ fn updater_settings() -> UpdaterSettings {
         endpoint: UPDATE_ENDPOINT_OVERRIDE
             .unwrap_or(DEFAULT_UPDATE_ENDPOINT)
             .to_string(),
-        pubkey: UPDATE_PUBKEY.map(str::to_string).filter(|value| !value.trim().is_empty()),
+        pubkey: resolve_updater_pubkey(),
         channel: DEFAULT_UPDATE_CHANNEL.to_string(),
     }
+}
+
+fn resolve_updater_pubkey() -> Option<String> {
+    if let Some(value) = UPDATE_PUBKEY {
+        let value = value.trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+
+    if let Ok(value) = std::env::var("NANOBOT_DESKTOP_UPDATER_PUBKEY") {
+        let value = value.trim().to_string();
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+
+    let value = EMBEDDED_UPDATE_PUBKEY.trim();
+    if !value.is_empty() {
+        return Some(value.to_string());
+    }
+
+    None
 }

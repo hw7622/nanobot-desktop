@@ -2,7 +2,7 @@
   { id: "dashboard", short: "DB", label: "仪表盘", hint: "核心状态、控制与启动行为" },
   { id: "ai", short: "AI", label: "AI 配置", hint: "Provider、模型与高级参数" },
   { id: "channels", short: "CN", label: "渠道配置", hint: "Telegram、飞书等入口开关" },
-  { id: "skills", short: "SK", label: "Skills", hint: "技能卡片与工作区目录" },
+  { id: "skills", short: "SK", label: "技能库", hint: "技能卡片与工作区目录" },
   { id: "logs", short: "LG", label: "实时日志", hint: "全屏查看聚合日志" },
 ];
 
@@ -12,7 +12,18 @@ const API_BASE = (() => {
   return "http://127.0.0.1:18791";
 })();
 
-const TAURI_INVOKE = window.__TAURI__?.core?.invoke;
+const TAURI_INVOKE = window.__TAURI__?.core?.invoke || window.__TAURI_INTERNALS__?.invoke;
+const TAURI_WINDOW = window.__TAURI__?.webviewWindow || window.__TAURI__?.window;
+const BUILTIN_SKILL_DESCRIPTION_ZH = {
+  clawhub: "从 ClawHub 公共技能仓库中搜索并安装技能。",
+  cron: "安排提醒、定时任务和周期任务。",
+  github: "使用 GitHub CLI 处理仓库、Issue、PR、Actions 和 API。",
+  memory: "双层记忆系统，用于长期记忆和历史检索。",
+  "skill-creator": "创建或更新技能包。",
+  summarize: "总结或提取链接、视频和本地文件内容。",
+  tmux: "管理 tmux 会话和终端窗口。",
+  weather: "查询天气和天气预报。",
+};
 
 const state = {
   tab: "dashboard",
@@ -48,7 +59,7 @@ const state = {
   logLastRefreshAt: 0,
   logSelectionPaused: false,
   logRefreshBusy: false,
-  logSource: "gateway",
+  logSource: "all",
   chatStickBottom: true,
   chatScrollTop: 0,
   pageScrollTops: {},
@@ -60,6 +71,8 @@ const state = {
   chatRefreshQueued: false,
   chatRefreshQueuedManual: false,
   sessionActionBusy: "",
+  closePromptOpen: false,
+  closePromptBypass: false,
 };
 
 let refreshHandle = 0;
@@ -78,11 +91,13 @@ const els = {
   gatewayDot: document.getElementById("gatewayDot"),
   gatewayLabel: document.getElementById("gatewayLabel"),
   versionMeta: document.getElementById("versionMeta"),
+  closePromptLayer: document.getElementById("closePromptLayer"),
 };
 
 init();
 
 async function init() {
+  bindWindowCloseHandler();
   els.saveBtn.addEventListener("click", () => saveConfig({ restartAfterSave: false }));
   els.saveRestartBtn.addEventListener("click", () => saveConfig({ restartAfterSave: true }));
   renderShellLoading();
@@ -170,6 +185,24 @@ async function refreshRuntime() {
     state.bootstrapError = `状态刷新失败：${error.message || error}`;
     renderHeader();
   }
+}
+
+function bindWindowCloseHandler() {
+  const openClosePrompt = () => {
+    if (state.closePromptBypass || state.closePromptOpen) return;
+    state.closePromptOpen = true;
+    renderClosePrompt();
+  };
+
+  window.__NANOBOT_OPEN_CLOSE_PROMPT__ = openClosePrompt;
+  window.__NANOBOT_SUBMIT_CLOSE_ACTION__ = (action) => submitCloseAction(action);
+
+  const currentWindow = TAURI_WINDOW?.getCurrentWebviewWindow?.() || TAURI_WINDOW?.getCurrentWindow?.();
+  if (!currentWindow?.onCloseRequested) return;
+  Promise.resolve(currentWindow.onCloseRequested((event) => {
+    event?.preventDefault?.();
+    openClosePrompt();
+  })).catch(() => {});
 }
 
 async function refreshChatData(options = {}) {
@@ -388,7 +421,11 @@ async function checkUpdates() {
   try {
     state.updater = await invokeTauri("check_for_updates");
   } catch (error) {
-    state.updater = fallbackUpdaterState(`检查更新失败：${error.message || error}`);
+    const raw = String(error?.message || error || "");
+    const note = raw.includes("Could not fetch a valid release JSON from the remote")
+      ? "检查更新失败：GitHub 上还没有可用的 latest.json，当前更新地址返回 404。"
+      : `检查更新失败：${raw}`;
+    state.updater = fallbackUpdaterState(note);
   } finally {
     state.updaterBusy = "";
     renderBody();
@@ -807,11 +844,54 @@ async function copyText(text) {
   window.prompt("请手动复制以下内容", text);
 }
 
+async function submitCloseAction(action) {
+  if (action === "cancel") {
+    state.closePromptOpen = false;
+    renderClosePrompt();
+    return;
+  }
+  try {
+    if (action === "exit") state.closePromptBypass = true;
+    state.closePromptOpen = false;
+    renderClosePrompt();
+    await invokeTauri("handle_close_action", { action });
+  } catch (error) {
+    state.closePromptBypass = false;
+    window.alert(`关闭操作失败：${error.message || error}`);
+  }
+}
+
+function renderClosePrompt() {
+  if (!els.closePromptLayer) return;
+  if (!state.closePromptOpen) {
+    els.closePromptLayer.innerHTML = "";
+    return;
+  }
+  els.closePromptLayer.innerHTML = `
+    <div class="overlay-mask">
+      <section class="close-prompt-card" role="dialog" aria-modal="true" aria-labelledby="closePromptTitle">
+        <p class="eyebrow">窗口关闭</p>
+        <h3 id="closePromptTitle">选择“最小化”还是“关闭”</h3>
+        <p class="muted">最小化会继续在托盘后台运行；关闭会直接退出桌面端。</p>
+        <div class="close-prompt-actions">
+          <button class="button button-primary" data-close-action="minimize">最小化</button>
+          <button class="button" data-close-action="exit">关闭</button>
+          <button class="button button-ghost" data-close-action="cancel">取消</button>
+        </div>
+      </section>
+    </div>
+  `;
+  for (const button of els.closePromptLayer.querySelectorAll("[data-close-action]")) {
+    button.onclick = () => void submitCloseAction(button.dataset.closeAction);
+  }
+}
+
 function render() {
   renderShellFrame();
   renderNav();
   renderHeader();
   renderBody();
+  renderClosePrompt();
 }
 
 function renderShellFrame() {
@@ -920,6 +1000,9 @@ function pageDashboard() {
   const desktop = ensureDesktopConfig(state.draft);
   const channels = enabledChannels();
   const refreshSeconds = desktop.chat.refreshIntervalSeconds || 3;
+  const updaterSummary = updaterSummaryText();
+  const updaterDetail = updaterDetailText();
+  const currentVersion = state.updater.currentVersion || state.bootstrap.meta.desktopVersion;
   return `
     <div class="dashboard-page">
       <section class="stats-grid dashboard-stats">
@@ -979,13 +1062,14 @@ function pageDashboard() {
           </div>
           <div class="dashboard-updater">
             <div>
-              <p class="eyebrow">Updater</p>
-              <strong>当前版本 ${esc(state.updater.currentVersion || state.bootstrap.meta.desktopVersion)}</strong>
-              <p class="muted">${esc(state.updater.note || "检查是否有可用桌面更新")}</p>
+              <p class="eyebrow">版本更新</p>
+              <strong>当前版本 ${esc(currentVersion)}</strong>
+              <p class="muted">${esc(updaterSummary)}</p>
+              ${updaterDetail ? `<p class="muted">${esc(updaterDetail)}</p>` : ""}
             </div>
             <div class="dashboard-updater-actions">
-              <button class="button button-primary" id="checkUpdatesBtn" ${state.updaterBusy ? "disabled" : ""}>${state.updaterBusy === "check" ? "检查中..." : "检查更新"}</button>
-              <button class="button" data-switch-tab="logs">查看日志</button>
+              <button class="button button-primary" id="checkUpdatesBtn" ${(!TAURI_INVOKE || state.updaterBusy) ? "disabled" : ""}>${state.updaterBusy === "check" ? "检查中..." : "检查更新"}</button>
+              ${state.updater.pending ? `<button class="button" id="installUpdateBtn" ${state.updaterBusy ? "disabled" : ""}>${state.updaterBusy === "install" ? "安装中..." : "安装更新"}</button>` : ""}
             </div>
           </div>
         </article>
@@ -1040,27 +1124,25 @@ function pageAi() {
   return pageFrame(`
     <div class="page-stack page-scroll-stack workspace-page">
       <section class="workspace-hero ai-hero">
-        <div class="workspace-hero-copy">
-          <p class="eyebrow">AI 配置</p>
-          <h3>模型接入</h3>
-          <div class="workspace-chip-row">
-            <span class="workspace-chip strong">${esc(providerDisplayName(current.key, current.label))}</span>
-            <span class="workspace-chip mono-chip" title="${escAttr(modelValue)}">${esc(shortPath(modelValue))}</span>
-            <span class="workspace-chip">${state.aiAdvancedOpen ? "高级参数已展开" : "高级参数已收起"}</span>
+        <div class="ai-hero-top">
+          <div class="workspace-hero-copy">
+            <div class="ai-hero-heading">
+              <p class="eyebrow">AI 配置</p>
+              <h3>模型接入</h3>
+            </div>
+            <div class="workspace-chip-row ai-chip-row">
+              <span class="workspace-chip strong">${esc(providerDisplayName(current.key, current.label))}</span>
+              <span class="workspace-chip mono-chip" title="${escAttr(modelValue)}">${esc(shortPath(modelValue))}</span>
+            </div>
           </div>
-        </div>
-        <section class="workspace-hero-side ai-provider-card">
-          <label class="field-card ai-provider-picker">
+          <label class="field-card ai-provider-picker ai-provider-picker-inline">
             <span class="field-label">AI 服务商</span>
             <select data-field-path="agents.defaults.provider" data-field-type="text">
               ${providers.map((item) => `<option value="${escAttr(item.key)}" ${item.key === current.key ? "selected" : ""}>${esc(providerDisplayName(item.key, item.label))}</option>`).join("")}
             </select>
           </label>
-          <div class="mini-stats">
-            <div class="mini-stat"><span>基础项</span><strong>3</strong></div>
-            <div class="mini-stat"><span>高级分组</span><strong>3</strong></div>
-          </div>
-        </section>
+        </div>
+        <p class="field-help ai-provider-compact-help">切换服务商后，下方必填项、默认地址说明和实际生效地址会自动更新。</p>
       </section>
       <section class="page-stack ai-stack workspace-content">
         <article class="panel stack-card ai-card workspace-card">
@@ -1282,10 +1364,10 @@ function pageSkillsLegacy() {
 
 function pageLogs() {
   const sources = [
+    { key: "all", label: "全部" },
     { key: "gateway", label: "Gateway" },
     { key: "weixin-runtime", label: "微信 Runtime" },
     { key: "weixin-api", label: "微信 API" },
-    { key: "all", label: "全部" },
     { key: "desktop", label: "Desktop" },
   ];
   return `
@@ -1506,6 +1588,8 @@ function renderMcpCard(name, server) {
 
 function renderSkillCard(item) {
   const sourceLabel = item.source === "workspace" ? "自定义" : "内置";
+  const triggerLabel = item.always ? "始终加载" : "按需触发";
+  const description = skillDescription(item);
   return `
     <article class="catalog-card catalog-card-redesign skill-card-redesign">
       <div class="catalog-head">
@@ -1515,9 +1599,9 @@ function renderSkillCard(item) {
         </div>
         <span class="status-tag ${item.source === "workspace" ? "running" : ""}">${esc(sourceLabel)}</span>
       </div>
-      <p class="catalog-desc">${esc(item.metadata.description || "暂无描述")}</p>
+      <p class="catalog-desc">${esc(description)}</p>
       <div class="catalog-meta mono-inline" title="${escAttr(item.path)}">${esc(item.path)}</div>
-      <div class="catalog-foot">${item.editable ? `<button class="button button-ghost" data-delete-skill="${escAttr(item.name)}">删除</button>` : `<span></span>`}<span class="catalog-count mono-inline">always ${item.always ? "true" : "false"}</span></div>
+      <div class="catalog-foot">${item.editable ? `<button class="button button-ghost" data-delete-skill="${escAttr(item.name)}">删除</button>` : `<span></span>`}<span class="catalog-count mono-inline">触发方式 ${esc(triggerLabel)}</span></div>
     </article>
   `;
 }
@@ -2176,6 +2260,42 @@ function clone(value) {
 
 function fallbackUpdaterState(note) {
   return { supported: Boolean(TAURI_INVOKE), configured: false, currentVersion: "", pending: null, channel: "stable", endpoint: "", note };
+}
+
+function skillDescription(item) {
+  const metadata = item?.metadata || {};
+  const candidates = [
+    metadata.descriptionZh,
+    metadata.description_zh,
+    metadata.descriptionCn,
+    metadata.description_cn,
+    metadata.zhDescription,
+    metadata.zh_description,
+    metadata.description,
+  ];
+  if (item?.source === "builtin" && BUILTIN_SKILL_DESCRIPTION_ZH[item.name]) {
+    return BUILTIN_SKILL_DESCRIPTION_ZH[item.name];
+  }
+  const value = candidates.find((entry) => typeof entry === "string" && entry.trim());
+  return value || "暂无描述";
+}
+
+function updaterSummaryText() {
+  if (state.updaterBusy === "install") return "正在安装新版本";
+  if (state.updaterBusy === "check") return "正在检查新版本";
+  if (state.updater.pending?.version) return `发现新版本 ${state.updater.pending.version}`;
+  if (!TAURI_INVOKE) return "当前环境不支持版本检查";
+  return "可手动检查新版本";
+}
+
+function updaterDetailText() {
+  if (state.updater.pending?.currentVersion) {
+    return `可从 ${state.updater.pending.currentVersion} 更新到 ${state.updater.pending.version}`;
+  }
+  const note = String(state.updater.note || "").trim();
+  if (!note) return "";
+  if (note.includes("失败")) return note;
+  return "";
 }
 
 async function invokeTauri(command, args = {}) {

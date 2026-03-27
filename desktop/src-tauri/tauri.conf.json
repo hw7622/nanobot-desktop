@@ -39,7 +39,7 @@
       "endpoints": [
         "https://github.com/hw7622/nanobot-desktop/releases/latest/download/latest.json"
       ],
-      "pubkey": "NANOBOT_DESKTOP_UPDATER_PUBKEY_PLACEHOLDER"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUxMUU1NTUzN0E1MzUwQzIKUldUQ1VGTjZVMVVlNGVyMUoxblIvZGovM0I4aE1XRFVQUE4xZ2dCUU0ydUxqSVplNmdnUXlaWWwK"
     }
   }
 }

@@ -41,6 +41,7 @@ CHANNEL_DEFAULTS = {
     },
     "weixin": {
         "enabled": False,
+        "allowFrom": ["*"],
         "apiPort": 31966,
         "baseUrl": "https://ilinkai.weixin.qq.com",
         "pluginDir": "",
@@ -120,6 +121,7 @@ CHANNEL_FIELD_META = {
     ],
     "weixin": [
         {"key": "enabled", "label": "启用微信插件", "type": "toggle"},
+        {"key": "allowFrom", "label": "允许访问的用户", "type": "list", "placeholder": "* 表示允许所有联系人"},
         {"key": "apiPort", "label": "本地接口端口", "type": "number"},
         {"key": "baseUrl", "label": "微信服务地址", "type": "text"},
         {"key": "pluginDir", "label": "插件目录", "type": "text", "placeholder": "留空则自动使用默认目录"},

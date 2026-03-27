@@ -12,6 +12,7 @@ from typing import Any
 from nanobot.config.schema import Config
 from nanobot.providers.registry import find_by_name
 from nanobot.config.paths import get_workspace_path as get_core_workspace_path
+from nanobot.channels.registry import discover_all
 
 from nanobot_desktop_backend.paths import (
     ensure_dirs,
@@ -33,6 +34,20 @@ def _read_json(path: Path, fallback: dict[str, Any]) -> dict[str, Any]:
         return data if isinstance(data, dict) else fallback
     except Exception:
         return fallback
+
+
+def _merge_missing_defaults(existing: Any, defaults: Any) -> Any:
+    """Recursively fill missing values without overwriting user config."""
+    if not isinstance(existing, dict) or not isinstance(defaults, dict):
+        return existing
+
+    merged = dict(existing)
+    for key, value in defaults.items():
+        if key not in merged:
+            merged[key] = value
+        else:
+            merged[key] = _merge_missing_defaults(merged[key], value)
+    return merged
 
 
 def _merge_desktop_defaults(payload: dict[str, Any]) -> dict[str, Any]:
@@ -71,6 +86,36 @@ def _split_runtime_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], dic
     return core, _merge_desktop_defaults({"desktop": desktop})["desktop"]
 
 
+def _normalize_channels(payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    channels = payload.setdefault("channels", {})
+    changed = False
+
+    for name, cls in discover_all().items():
+        defaults = cls.default_config()
+        current = channels.get(name)
+        had_allow_from = isinstance(current, dict) and ("allowFrom" in current or "allow_from" in current)
+        if not isinstance(current, dict):
+            channels[name] = defaults
+            changed = True
+            current = channels[name]
+        else:
+            merged = _merge_missing_defaults(current, defaults)
+            if merged != current:
+                channels[name] = merged
+                changed = True
+                current = merged
+
+        # Legacy desktop Weixin configs predate allowFrom; preserve prior
+        # "enabled means usable" behavior by explicitly allowing all contacts.
+        if name == "weixin" and isinstance(current, dict) and current.get("enabled"):
+            allow_from = current.get("allowFrom", current.get("allow_from"))
+            if not had_allow_from or allow_from == []:
+                current["allowFrom"] = ["*"]
+                changed = True
+
+    return payload, changed
+
+
 def _load_core_config_payload() -> dict[str, Any]:
     config_path = get_config_path()
     if not config_path.exists():
@@ -80,12 +125,14 @@ def _load_core_config_payload() -> dict[str, Any]:
                 continue
             core_payload, desktop_state = _split_runtime_payload(payload)
             core_payload = _normalize_workspace(core_payload)
+            core_payload, _ = _normalize_channels(core_payload)
             config_path.parent.mkdir(parents=True, exist_ok=True)
             config_path.write_text(json.dumps(core_payload, indent=2, ensure_ascii=False), encoding="utf-8")
             save_desktop_state(desktop_state)
             return core_payload
         workspace = str(get_workspace_dir())
         payload = default_config_payload(workspace)
+        payload, _ = _normalize_channels(payload)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         if not get_desktop_state_path().exists():
@@ -95,6 +142,7 @@ def _load_core_config_payload() -> dict[str, Any]:
     payload = _read_json(config_path, {})
     if not payload:
         payload = default_config_payload(str(get_workspace_dir()))
+        payload, _ = _normalize_channels(payload)
         config_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         if not get_desktop_state_path().exists():
             save_desktop_state(_default_desktop_state())
@@ -109,8 +157,9 @@ def _load_core_config_payload() -> dict[str, Any]:
         desktop_state = load_desktop_state()
 
     payload = _normalize_workspace(payload)
+    payload, channels_changed = _normalize_channels(payload)
 
-    if migrated:
+    if migrated or channels_changed:
         config_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     elif not get_desktop_state_path().exists():
         save_desktop_state(desktop_state)
