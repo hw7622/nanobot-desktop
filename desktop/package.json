@@ -1,7 +1,7 @@
 {
   "name": "nanobot-desktop",
   "private": true,
-  "version": "0.1.6",
+  "version": "0.1.7",
   "scripts": {
     "dev:backend": "python run_backend.py",
     "dev": "powershell -ExecutionPolicy Bypass -File .\\run_tauri_dev_hidden.ps1",

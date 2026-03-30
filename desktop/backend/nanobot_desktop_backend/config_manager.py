@@ -116,6 +116,27 @@ def _normalize_channels(payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     return payload, changed
 
 
+def _normalize_providers(payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    providers = payload.setdefault("providers", {})
+    changed = False
+
+    if not isinstance(providers, dict):
+        payload["providers"] = {}
+        return payload, True
+
+    for provider in providers.values():
+        if not isinstance(provider, dict):
+            continue
+        if "timeoutSeconds" in provider:
+            provider.pop("timeoutSeconds", None)
+            changed = True
+        if "timeout_seconds" in provider:
+            provider.pop("timeout_seconds", None)
+            changed = True
+
+    return payload, changed
+
+
 def _load_core_config_payload() -> dict[str, Any]:
     config_path = get_config_path()
     if not config_path.exists():
@@ -126,6 +147,7 @@ def _load_core_config_payload() -> dict[str, Any]:
             core_payload, desktop_state = _split_runtime_payload(payload)
             core_payload = _normalize_workspace(core_payload)
             core_payload, _ = _normalize_channels(core_payload)
+            core_payload, _ = _normalize_providers(core_payload)
             config_path.parent.mkdir(parents=True, exist_ok=True)
             config_path.write_text(json.dumps(core_payload, indent=2, ensure_ascii=False), encoding="utf-8")
             save_desktop_state(desktop_state)
@@ -158,8 +180,9 @@ def _load_core_config_payload() -> dict[str, Any]:
 
     payload = _normalize_workspace(payload)
     payload, channels_changed = _normalize_channels(payload)
+    payload, providers_changed = _normalize_providers(payload)
 
-    if migrated or channels_changed:
+    if migrated or channels_changed or providers_changed:
         config_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     elif not get_desktop_state_path().exists():
         save_desktop_state(desktop_state)
@@ -314,6 +337,7 @@ def save_runtime_config(payload: dict[str, Any]) -> dict[str, Any]:
     payload = _merge_desktop_defaults(payload)
     workspace = payload.setdefault("agents", {}).setdefault("defaults", {}).setdefault("workspace", str(get_workspace_dir()))
     core_payload, desktop_state = _split_runtime_payload(payload)
+    core_payload, _ = _normalize_providers(core_payload)
     config_path.write_text(json.dumps(core_payload, indent=2, ensure_ascii=False), encoding="utf-8")
     save_desktop_state(desktop_state)
     _sync_workspace_templates(Path(workspace).expanduser())

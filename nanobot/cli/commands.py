@@ -414,7 +414,6 @@ def _make_provider(config: Config):
             api_key=p.api_key,
             api_base=p.api_base,
             default_model=model,
-            timeout_seconds=p.timeout_seconds if p else None,
         )
     elif backend == "anthropic":
         from nanobot.providers.anthropic_provider import AnthropicProvider
@@ -423,7 +422,6 @@ def _make_provider(config: Config):
             api_base=config.get_api_base(model),
             default_model=model,
             extra_headers=p.extra_headers if p else None,
-            timeout_seconds=p.timeout_seconds if p else None,
         )
     else:
         from nanobot.providers.openai_compat_provider import OpenAICompatProvider
@@ -433,7 +431,6 @@ def _make_provider(config: Config):
             default_model=model,
             extra_headers=p.extra_headers if p else None,
             spec=spec,
-            timeout_seconds=p.timeout_seconds if p else None,
         )
 
     defaults = config.agents.defaults

@@ -149,6 +149,7 @@ class ChatManager:
             "content": text,
             "timestamp": message.get("timestamp", ""),
             "name": message.get("name", ""),
+            "media": list(message.get("media") or []),
         }
 
     def _drain_outbound_unlocked(self) -> list[dict[str, Any]]:

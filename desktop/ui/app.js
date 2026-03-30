@@ -1697,7 +1697,7 @@ function renderChatFeed() {
     return `
       <article class="bubble-row ${userSide ? "user" : "assistant"}">
         <div class="bubble-meta"><span>${esc(roleLabel(item.role, item.name))}</span><span>${esc(shortTimestamp(item.timestamp))}</span></div>
-        <div class="bubble">${renderMessageContent(item.content || "")}</div>
+        <div class="bubble">${renderBubbleContent(item)}</div>
       </article>
     `;
   }).join("");
@@ -1937,7 +1937,6 @@ function roleLabel(role, name) {
 
 function visibleChatItems() {
   const items = Array.isArray(state.selectedSessionItems) ? state.selectedSessionItems : [];
-  if (isDesktopConsoleSession()) return items;
   return projectExternalChatItems(items);
 }
 
@@ -1952,7 +1951,7 @@ function projectExternalChatItems(items) {
   let fallbackAssistants = [];
 
   const flushTurn = () => {
-    if (currentUser && hasRenderableMessageContent(currentUser)) visible.push(currentUser);
+    if (currentUser && hasRenderableBubble(currentUser)) visible.push(currentUser);
     const assistants = outboundAssistants.length ? outboundAssistants : fallbackAssistants;
     for (const item of assistants) {
       if (shouldRenderExternalChatItem(item)) visible.push(item);
@@ -1998,10 +1997,10 @@ function projectExternalChatItems(items) {
 
 function shouldRenderExternalChatItem(item) {
   if (!item || typeof item !== "object") return false;
-  if (item.role === "user") return hasRenderableMessageContent(item);
+  if (item.role === "user") return hasRenderableBubble(item);
   if (item.role !== "assistant") return false;
   if (Array.isArray(item.toolCalls) && item.toolCalls.length) return false;
-  return hasRenderableMessageContent(item);
+  return hasRenderableBubble(item);
 }
 
 function isExplicitOutboundItem(item) {
@@ -2025,36 +2024,41 @@ function extractMessageToolCallItems(item) {
     if (!args || typeof args !== "object") continue;
     if (String(args.channel || "") !== sessionChannel) continue;
     if (String(args.chat_id || "") !== sessionChatId) continue;
-    const mediaLines = Array.isArray(args.media) ? args.media.map((media) => formatOutboundMediaLine(media)).filter(Boolean) : [];
+    const mediaPaths = Array.isArray(args.media) ? args.media.map((media) => normalizeMediaValue(media)).filter(Boolean) : [];
+    const imageMedia = mediaPaths.filter((media) => isImageMediaValue(media));
+    const mediaLines = mediaPaths.filter((media) => !isImageMediaValue(media)).map((media) => formatOutboundMediaLine(media)).filter(Boolean);
     const text = typeof args.content === "string" ? args.content.trim() : "";
     if (text || mediaLines.length) {
-      results.push(buildSyntheticOutboundItem(item, text, mediaLines));
+      results.push(buildSyntheticOutboundItem(item, text, imageMedia, mediaLines));
+      continue;
+    }
+    if (imageMedia.length) {
+      results.push(buildSyntheticOutboundItem(item, text, imageMedia, mediaLines));
       continue;
     }
     if (!text && !mediaLines.length) {
-      results.push(buildSyntheticOutboundItem(item, "[已发送消息]"));
+      results.push(buildSyntheticOutboundItem(item, "[已发送消息]", [], []));
     }
   }
   return results;
 }
 
-function buildSyntheticOutboundItem(sourceItem, text, extraLines = []) {
+function buildSyntheticOutboundItem(sourceItem, text, media = [], extraLines = []) {
   const lines = [];
   if (typeof text === "string" && text.trim()) lines.push(text.trim());
-  for (const line of extraLines) {
-    if (typeof line === "string" && line.trim()) lines.push(line.trim());
-  }
   return {
     role: "assistant",
     name: sourceItem?.name || "",
     timestamp: sourceItem?.timestamp || "",
     content: lines.join("\n\n").trim(),
+    media: Array.isArray(media) ? media : [],
+    attachments: Array.isArray(extraLines) ? extraLines.filter((line) => typeof line === "string" && line.trim()).map((line) => line.trim()) : [],
     metadata: { _desktop_projected_outbound: true },
   };
 }
 
 function formatOutboundMediaLine(media) {
-  const raw = String(media || "").trim();
+  const raw = normalizeMediaValue(media);
   if (!raw) return "";
   const normalized = raw.replace(/\\/g, "/");
   const name = normalized.split("/").pop() || raw;
@@ -2076,6 +2080,95 @@ function hasRenderableMessageContent(item) {
     return false;
   });
   return false;
+}
+
+function hasRenderableBubble(item) {
+  const parts = getBubbleDisplayParts(item);
+  return Boolean(parts.text || parts.images.length || parts.attachments.length);
+}
+
+function normalizeMediaValue(value) {
+  return String(value || "").trim().replace(/^['"]+|['"]+$/g, "");
+}
+
+function isRemoteHttpUrl(value) {
+  return /^https?:\/\//i.test(String(value || "").trim());
+}
+
+function isImageMediaValue(value) {
+  const raw = normalizeMediaValue(value);
+  if (!raw) return false;
+  return /\.(png|jpg|jpeg|gif|webp|bmp)(?:$|[?#])/i.test(raw);
+}
+
+function mediaPreviewSrc(value) {
+  const raw = normalizeMediaValue(value);
+  if (!raw) return "";
+  if (isRemoteHttpUrl(raw)) return raw;
+  return `${API_BASE}/api/media?path=${encodeURIComponent(raw)}`;
+}
+
+function getBubbleDisplayParts(item) {
+  const imageSet = new Set();
+  const images = [];
+  const attachments = [];
+
+  const pushImage = (value) => {
+    const raw = normalizeMediaValue(value);
+    if (!raw || !isImageMediaValue(raw) || imageSet.has(raw)) return;
+    imageSet.add(raw);
+    images.push(raw);
+  };
+
+  const pushAttachment = (value) => {
+    const raw = normalizeMediaValue(value);
+    if (!raw) return;
+    if (isImageMediaValue(raw)) {
+      pushImage(raw);
+      return;
+    }
+    const line = formatOutboundMediaLine(raw);
+    if (line) attachments.push(line);
+  };
+
+  let text = typeof item?.content === "string" ? item.content : "";
+  text = text.replace(/\[Image:\s*source:\s*([^\]\r\n]+)\]/gi, (_, path) => {
+    pushImage(path);
+    return "";
+  });
+  text = text.replace(/\[image:\s*([^\]\r\n]+)\]/gi, (_, path) => {
+    pushImage(path);
+    return "";
+  });
+  text = text.replace(/^\[image\]\s*$/gim, "");
+
+  for (const media of Array.isArray(item?.media) ? item.media : []) pushAttachment(media);
+  for (const line of Array.isArray(item?.attachments) ? item.attachments : []) {
+    if (typeof line === "string" && line.trim()) attachments.push(line.trim());
+  }
+
+  text = text.replace(/\n{3,}/g, "\n\n").trim();
+  return { text, images, attachments };
+}
+
+function renderBubbleContent(item) {
+  const parts = getBubbleDisplayParts(item);
+  const sections = [];
+  if (parts.text) sections.push(`<div class="bubble-text">${renderMessageContent(parts.text)}</div>`);
+  if (parts.images.length) {
+    sections.push(`
+      <div class="bubble-media-strip">
+        ${parts.images.map((path) => {
+          const name = path.replace(/\\/g, "/").split("/").pop() || path;
+          return `<figure class="chat-inline-media"><img src="${escAttr(mediaPreviewSrc(path))}" alt="${escAttr(name)}" loading="lazy"><figcaption>${esc(name)}</figcaption></figure>`;
+        }).join("")}
+      </div>
+    `);
+  }
+  if (parts.attachments.length) {
+    sections.push(`<div class="bubble-attachment-list">${parts.attachments.map((line) => `<div class="bubble-attachment-item">${esc(line)}</div>`).join("")}</div>`);
+  }
+  return sections.join("");
 }
 
 function formatUpdatedAt(value) {

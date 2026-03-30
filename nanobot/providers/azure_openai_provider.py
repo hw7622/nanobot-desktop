@@ -14,6 +14,7 @@ import json_repair
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
 _AZURE_MSG_KEYS = frozenset({"role", "content", "tool_calls", "tool_call_id", "name"})
+_AZURE_REQUEST_TIMEOUT_SECONDS = 45
 
 
 class AzureOpenAIProvider(LLMProvider):
@@ -33,12 +34,10 @@ class AzureOpenAIProvider(LLMProvider):
         api_key: str = "",
         api_base: str = "",
         default_model: str = "gpt-5.2-chat",
-        timeout_seconds: int | None = None,
     ):
         super().__init__(api_key, api_base)
         self.default_model = default_model
         self.api_version = "2024-10-21"
-        self.timeout_seconds = max(5, int(timeout_seconds or 45))
         
         # Validate required parameters
         if not api_key:
@@ -148,7 +147,7 @@ class AzureOpenAIProvider(LLMProvider):
         )
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds, verify=True) as client:
+            async with httpx.AsyncClient(timeout=_AZURE_REQUEST_TIMEOUT_SECONDS, verify=True) as client:
                 response = await client.post(url, headers=headers, json=payload)
                 if response.status_code != 200:
                     return LLMResponse(
@@ -234,7 +233,7 @@ class AzureOpenAIProvider(LLMProvider):
         payload["stream"] = True
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds, verify=True) as client:
+            async with httpx.AsyncClient(timeout=_AZURE_REQUEST_TIMEOUT_SECONDS, verify=True) as client:
                 async with client.stream("POST", url, headers=headers, json=payload) as response:
                     if response.status_code != 200:
                         text = await response.aread()

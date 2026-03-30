@@ -332,6 +332,9 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/logs":
             self._json(self._read_logs(parsed.query))
             return
+        if parsed.path == "/api/media":
+            self._serve_media(parsed.query)
+            return
         if parsed.path == "/api/chat/history":
             self._json({"ok": True, "items": self.state.chat.history()})
             return
@@ -511,6 +514,62 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type or "application/octet-stream")
         self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    @staticmethod
+    def _path_is_within(path: Path, root: Path) -> bool:
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            return False
+
+    def _serve_media(self, raw_query: str) -> None:
+        query = parse_qs(raw_query)
+        raw_path = str(query.get("path", [""])[0] or "").strip()
+        if not raw_path:
+            self.send_error(HTTPStatus.BAD_REQUEST, "missing media path")
+            return
+
+        try:
+            target = Path(raw_path).expanduser().resolve(strict=True)
+        except FileNotFoundError:
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+        except OSError:
+            self.send_error(HTTPStatus.BAD_REQUEST, "invalid media path")
+            return
+
+        if not target.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND)
+            return
+
+        content_type, _ = mimetypes.guess_type(target.name)
+        if not content_type or not content_type.startswith("image/"):
+            self.send_error(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "only local images are previewable")
+            return
+
+        allowed_roots = [
+            Path.home().resolve(strict=False),
+            Path(tempfile.gettempdir()).resolve(strict=False),
+            get_data_dir().resolve(strict=False),
+        ]
+        try:
+            cfg = Config.model_validate(load_core_runtime_config())
+            allowed_roots.append(cfg.workspace_path.resolve(strict=False))
+        except Exception:
+            pass
+
+        if not any(self._path_is_within(target, root) for root in allowed_roots):
+            self.send_error(HTTPStatus.FORBIDDEN, "media path outside allowed roots")
+            return
+
+        data = target.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
 
@@ -836,6 +895,7 @@ def serialize_session_message(message: dict[str, Any]) -> dict[str, Any]:
         "content": text,
         "timestamp": message.get("timestamp", ""),
         "name": message.get("name", ""),
+        "media": list(message.get("media") or []),
         "toolCalls": list(message.get("tool_calls") or []),
         "metadata": dict(message.get("metadata") or {}),
     }

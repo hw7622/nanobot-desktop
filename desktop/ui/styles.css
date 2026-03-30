@@ -1952,6 +1952,52 @@ code {
   background: rgba(255, 255, 255, 0.18);
 }
 
+.bubble-text {
+  min-width: 0;
+}
+
+.bubble-media-strip {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.chat-inline-media {
+  margin: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.chat-inline-media img {
+  display: block;
+  max-width: min(100%, 360px);
+  border-radius: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.chat-inline-media figcaption {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.bubble-attachment-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.bubble-attachment-item {
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: rgba(148, 163, 184, 0.12);
+  font-size: 0.84rem;
+}
+
+.bubble-row.user .bubble-attachment-item {
+  background: rgba(255, 255, 255, 0.16);
+}
+
 .chat-compose {
   min-width: 0;
   flex-shrink: 0;

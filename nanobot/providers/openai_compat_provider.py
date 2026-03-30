@@ -115,13 +115,11 @@ class OpenAICompatProvider(LLMProvider):
         default_model: str = "gpt-4o",
         extra_headers: dict[str, str] | None = None,
         spec: ProviderSpec | None = None,
-        timeout_seconds: int | None = None,
     ):
         super().__init__(api_key, api_base)
         self.default_model = default_model
         self.extra_headers = extra_headers or {}
         self._spec = spec
-        self.timeout_seconds = max(5, int(timeout_seconds or 45))
 
         if api_key and spec and spec.env_key:
             self._setup_env(api_key, api_base)
@@ -136,7 +134,6 @@ class OpenAICompatProvider(LLMProvider):
         self._client = AsyncOpenAI(
             api_key=api_key or "no-key",
             base_url=effective_base,
-            timeout=self.timeout_seconds,
             default_headers=default_headers,
         )
 
