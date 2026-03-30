@@ -73,12 +73,15 @@ const state = {
   sessionActionBusy: "",
   closePromptOpen: false,
   closePromptBypass: false,
+  imagePreview: null,
+  dialog: null,
 };
 
 let refreshHandle = 0;
 let refreshIntervalMs = 0;
 let refreshListenersBound = false;
 let weixinLoginPollHandle = 0;
+let dialogResolver = null;
 
 const els = {
   shell: document.querySelector(".shell"),
@@ -98,6 +101,10 @@ init();
 
 async function init() {
   bindWindowCloseHandler();
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && state.imagePreview) closeImagePreview();
+    if (event.key === "Escape" && state.dialog) resolveDialog({ confirmed: false, value: null });
+  });
   els.saveBtn.addEventListener("click", () => saveConfig({ restartAfterSave: false }));
   els.saveRestartBtn.addEventListener("click", () => saveConfig({ restartAfterSave: true }));
   renderShellLoading();
@@ -190,9 +197,9 @@ async function refreshRuntime() {
 
 function bindWindowCloseHandler() {
   const openClosePrompt = () => {
-    if (state.closePromptBypass || state.closePromptOpen) return;
+    if (state.closePromptBypass || state.closePromptOpen || state.dialog || state.imagePreview) return;
     state.closePromptOpen = true;
-    renderClosePrompt();
+    renderOverlayLayer();
   };
 
   window.__NANOBOT_OPEN_CLOSE_PROMPT__ = openClosePrompt;
@@ -216,7 +223,7 @@ async function refreshChatData(options = {}) {
       state.chatRefreshQueuedManual = state.chatRefreshQueuedManual || manual;
       if (manual) {
         state.chatManualRefreshBusy = true;
-        if (state.tab === "chat") renderBody();
+        if (state.tab === "chat") renderChatPagePartial({ preserveInput: true });
       }
     }
     return;
@@ -224,14 +231,13 @@ async function refreshChatData(options = {}) {
   state.chatRefreshBusy = true;
   if (manual) {
     state.chatManualRefreshBusy = true;
-    if (state.tab === "chat") renderBody();
+    if (state.tab === "chat") renderChatPagePartial({ preserveInput: true });
   }
   captureChatScroll();
   try {
     await refreshSessions();
     await refreshSelectedSession();
     renderHeader();
-    renderBody();
   } catch (error) {
     state.bootstrapError = `聊天刷新失败：${error.message || error}`;
     renderHeader();
@@ -242,7 +248,7 @@ async function refreshChatData(options = {}) {
     state.chatRefreshQueued = false;
     state.chatRefreshQueuedManual = false;
     if (!queued) state.chatManualRefreshBusy = false;
-    if (state.tab === "chat") renderBody();
+    if (state.tab === "chat") renderChatPagePartial({ preserveInput: true });
     if (queued) void refreshChatData({ force: true, manual: queuedManual });
   }
 }
@@ -481,30 +487,34 @@ async function sendChatMessage() {
     state.chatStickBottom = true;
     await refreshSessions();
   } catch (error) {
-    window.alert(`发送失败：${error.message || error}`);
+    await showAlertDialog(`发送失败：${error.message || error}`, { title: "发送失败" });
   } finally {
     state.chatBusy = false;
-    renderBody();
+    renderChatPagePartial({ preserveInput: true });
   }
 }
 
 async function clearChatHistory() {
   if (state.chatBusy || state.selectedSessionKey !== "desktop:console") return;
-  if (!window.confirm("确定清空桌面测试会话吗？")) return;
+  if (!await showConfirmDialog("确定清空桌面测试会话吗？", { title: "清空测试会话" })) return;
   state.chatBusy = true;
-  renderBody();
+  renderChatPagePartial({ preserveInput: true });
   try {
     const payload = await fetchJson("/api/chat/clear", { method: "POST" });
     state.selectedSessionItems = payload.items || [];
     state.chatStickBottom = true;
   } finally {
     state.chatBusy = false;
-    renderBody();
+    renderChatPagePartial({ preserveInput: true });
   }
 }
 
 async function createSkill() {
-  const name = window.prompt("请输入新 Skill 名称");
+  const name = await showPromptDialog({
+    title: "新建 Skill",
+    message: "请输入新 Skill 名称",
+    placeholder: "skill-name",
+  });
   if (!name) return;
   try {
     const payload = await fetchJson("/api/skill/create", {
@@ -516,12 +526,12 @@ async function createSkill() {
     state.lastSaveMessage = `已创建 Skill：${payload.created.name}`;
     render();
   } catch (error) {
-    window.alert(`创建 Skill 失败：${error.message || error}`);
+    await showAlertDialog(`创建 Skill 失败：${error.message || error}`, { title: "创建 Skill 失败" });
   }
 }
 
 async function deleteSkill(name) {
-  if (!window.confirm(`确定删除 Skill '${name}' 吗？`)) return;
+  if (!await showConfirmDialog(`确定删除 Skill '${name}' 吗？`, { title: "删除 Skill" })) return;
   try {
     const payload = await fetchJson("/api/skill/delete", {
       method: "POST",
@@ -532,7 +542,7 @@ async function deleteSkill(name) {
     state.lastSaveMessage = `已删除 Skill：${name}`;
     render();
   } catch (error) {
-    window.alert(`删除 Skill 失败：${error.message || error}`);
+    await showAlertDialog(`删除 Skill 失败：${error.message || error}`, { title: "删除 Skill 失败" });
   }
 }
 
@@ -544,7 +554,7 @@ async function openTarget(target) {
       body: JSON.stringify({ target }),
     });
   } catch (error) {
-    window.alert(`打开失败：${error.message || error}`);
+    await showAlertDialog(`打开失败：${error.message || error}`, { title: "打开失败" });
   }
 }
 
@@ -580,9 +590,9 @@ async function clearSelectedSession() {
   if (!sessionKey || state.chatBusy || state.sessionActionBusy) return;
   const isDesktop = sessionKey === "desktop:console";
   const label = state.selectedSession?.title || sessionKey;
-  if (!window.confirm(`确定清空会话“${label}”吗？`)) return;
+  if (!await showConfirmDialog(`确定清空会话“${label}”吗？`, { title: "清空会话" })) return;
   state.sessionActionBusy = "clear";
-  renderBody();
+  renderChatPagePartial({ preserveInput: true });
   try {
     if (isDesktop) {
       const payload = await fetchJson("/api/chat/clear", { method: "POST" });
@@ -600,10 +610,10 @@ async function clearSelectedSession() {
     await refreshSessions();
     await refreshSelectedSession();
   } catch (error) {
-    window.alert(`清空会话失败：${error.message || error}`);
+    await showAlertDialog(`清空会话失败：${error.message || error}`, { title: "清空会话失败" });
   } finally {
     state.sessionActionBusy = "";
-    renderBody();
+    renderChatPagePartial({ preserveInput: true });
   }
 }
 
@@ -611,9 +621,9 @@ async function deleteSelectedSession() {
   const sessionKey = String(state.selectedSessionKey || "").trim();
   if (!sessionKey || sessionKey === "desktop:console" || state.chatBusy || state.sessionActionBusy) return;
   const label = state.selectedSession?.title || sessionKey;
-  if (!window.confirm(`确定删除会话“${label}”吗？删除后会从列表中移除。`)) return;
+  if (!await showConfirmDialog(`确定删除会话“${label}”吗？删除后会从列表中移除。`, { title: "删除会话" })) return;
   state.sessionActionBusy = "delete";
-  renderBody();
+  renderChatPagePartial({ preserveInput: true });
   try {
     await fetchJson("/api/session/delete", {
       method: "POST",
@@ -624,10 +634,10 @@ async function deleteSelectedSession() {
     await refreshSelectedSession();
     state.chatStickBottom = true;
   } catch (error) {
-    window.alert(`删除会话失败：${error.message || error}`);
+    await showAlertDialog(`删除会话失败：${error.message || error}`, { title: "删除会话失败" });
   } finally {
     state.sessionActionBusy = "";
-    renderBody();
+    renderChatPagePartial({ preserveInput: true });
   }
 }
 
@@ -670,7 +680,7 @@ async function weixinAction(action, payload = null) {
       renderBody();
       return;
     }
-    window.alert(`微信操作失败：${message}`);
+    await showAlertDialog(`微信操作失败：${message}`, { title: "微信操作失败" });
     renderBody();
   } finally {
     state.weixinBusy = "";
@@ -722,7 +732,7 @@ async function syncWeixinEnabled(enabled) {
   } catch (error) {
     state.draft = previousDraft;
     ensureDesktopConfig(state.draft);
-    window.alert(`微信渠道切换失败：${error.message || error}`);
+    await showAlertDialog(`微信渠道切换失败：${error.message || error}`, { title: "微信渠道切换失败" });
   } finally {
     state.weixinBusy = "";
     renderHeader();
@@ -797,14 +807,14 @@ async function pollWeixinLoginOnce() {
 async function copyLogs() {
   const text = selectedLogText();
   if (!text) {
-    window.alert("请先选中需要复制的日志内容。");
+    await showAlertDialog("请先选中需要复制的日志内容。", { title: "复制日志" });
     return;
   }
   await copyText(text);
 }
 
 async function clearLogs() {
-  if (!window.confirm("确定清空当前实时日志吗？这会清空 Gateway 和 Desktop 日志。")) return;
+  if (!await showConfirmDialog("确定清空当前实时日志吗？这会清空 Gateway 和 Desktop 日志。", { title: "清空日志" })) return;
   await fetchJson("/api/logs/clear", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -824,7 +834,7 @@ async function clearLogs() {
 
 async function copyText(text) {
   if (!text) {
-    window.alert("没有可复制的内容。");
+    await showAlertDialog("没有可复制的内容。");
     return;
   }
   try {
@@ -854,28 +864,188 @@ async function copyText(text) {
   finally {
     document.body.removeChild(textarea);
   }
-  window.prompt("请手动复制以下内容", text);
+  await showPromptDialog({
+    title: "请手动复制以下内容",
+    defaultValue: text,
+    multiline: true,
+    readOnly: true,
+    confirmLabel: "关闭",
+    hideCancel: true,
+  });
+}
+
+function resolveDialog(result) {
+  const resolve = dialogResolver;
+  dialogResolver = null;
+  state.dialog = null;
+  renderOverlayLayer();
+  if (typeof resolve === "function") resolve(result);
+}
+
+function showDialog(dialog) {
+  if (typeof dialogResolver === "function") {
+    dialogResolver({ confirmed: false, value: null });
+    dialogResolver = null;
+  }
+  state.dialog = {
+    kind: "alert",
+    title: "提示",
+    message: "",
+    confirmLabel: "确定",
+    cancelLabel: "取消",
+    defaultValue: "",
+    placeholder: "",
+    multiline: false,
+    readOnly: false,
+    hideCancel: false,
+    ...dialog,
+  };
+  renderOverlayLayer();
+  return new Promise((resolve) => {
+    dialogResolver = resolve;
+    window.requestAnimationFrame(() => {
+      const input = document.getElementById("dialogInput");
+      if (input && !state.dialog?.readOnly) input.focus();
+    });
+  });
+}
+
+async function showAlertDialog(message, options = {}) {
+  await showDialog({
+    kind: "alert",
+    title: options.title || "提示",
+    message,
+    confirmLabel: options.confirmLabel || "知道了",
+    hideCancel: true,
+  });
+}
+
+async function showConfirmDialog(message, options = {}) {
+  const result = await showDialog({
+    kind: "confirm",
+    title: options.title || "请确认",
+    message,
+    confirmLabel: options.confirmLabel || "确认",
+    cancelLabel: options.cancelLabel || "取消",
+  });
+  return Boolean(result?.confirmed);
+}
+
+async function showPromptDialog(options = {}) {
+  const result = await showDialog({
+    kind: "prompt",
+    title: options.title || "请输入内容",
+    message: options.message || "",
+    confirmLabel: options.confirmLabel || "确认",
+    cancelLabel: options.cancelLabel || "取消",
+    defaultValue: options.defaultValue || "",
+    placeholder: options.placeholder || "",
+    multiline: Boolean(options.multiline),
+    readOnly: Boolean(options.readOnly),
+    hideCancel: Boolean(options.hideCancel),
+  });
+  if (!result?.confirmed) return null;
+  return String(result.value ?? "");
 }
 
 async function submitCloseAction(action) {
   if (action === "cancel") {
     state.closePromptOpen = false;
-    renderClosePrompt();
+    renderOverlayLayer();
     return;
   }
   try {
     if (action === "exit") state.closePromptBypass = true;
     state.closePromptOpen = false;
-    renderClosePrompt();
+    renderOverlayLayer();
     await invokeTauri("handle_close_action", { action });
   } catch (error) {
     state.closePromptBypass = false;
-    window.alert(`关闭操作失败：${error.message || error}`);
+    await showAlertDialog(`关闭操作失败：${error.message || error}`, { title: "关闭操作失败" });
   }
 }
 
-function renderClosePrompt() {
+function openImagePreview(src, label) {
+  const resolvedSrc = String(src || "").trim();
+  if (!resolvedSrc) return;
+  state.imagePreview = { src: resolvedSrc, label: String(label || "").trim() };
+  renderOverlayLayer();
+}
+
+function closeImagePreview() {
+  if (!state.imagePreview) return;
+  state.imagePreview = null;
+  renderOverlayLayer();
+}
+
+function renderOverlayLayer() {
   if (!els.closePromptLayer) return;
+  if (state.imagePreview) {
+    els.closePromptLayer.innerHTML = `
+      <div class="overlay-mask image-preview-overlay" id="imagePreviewOverlay">
+        <section class="image-preview-card" role="dialog" aria-modal="true" aria-labelledby="imagePreviewTitle">
+          <div class="image-preview-head">
+            <div>
+              <p class="eyebrow">图片预览</p>
+              <h3 id="imagePreviewTitle">${esc(state.imagePreview.label || "聊天图片")}</h3>
+            </div>
+            <button class="button button-ghost" id="closeImagePreviewBtn">关闭</button>
+          </div>
+          <div class="image-preview-body">
+            <img class="image-preview-image" src="${escAttr(state.imagePreview.src)}" alt="${escAttr(state.imagePreview.label || "聊天图片")}">
+          </div>
+        </section>
+      </div>
+    `;
+    document.getElementById("closeImagePreviewBtn")?.addEventListener("click", closeImagePreview);
+    document.getElementById("imagePreviewOverlay")?.addEventListener("click", (event) => {
+      if (event.target?.id === "imagePreviewOverlay") closeImagePreview();
+    });
+    return;
+  }
+  if (state.dialog) {
+    const dialog = state.dialog;
+    const field = dialog.kind === "prompt"
+      ? (dialog.multiline
+        ? `<textarea class="dialog-textarea" id="dialogInput" ${dialog.readOnly ? "readonly" : ""} placeholder="${escAttr(dialog.placeholder || "")}">${esc(dialog.defaultValue || "")}</textarea>`
+        : `<input class="dialog-input" id="dialogInput" type="text" ${dialog.readOnly ? "readonly" : ""} value="${escAttr(dialog.defaultValue || "")}" placeholder="${escAttr(dialog.placeholder || "")}">`)
+      : "";
+    const messageHtml = dialog.message
+      ? `<p class="dialog-message">${esc(dialog.message).replace(/\n/g, "<br>")}</p>`
+      : "";
+    els.closePromptLayer.innerHTML = `
+      <div class="overlay-mask" id="dialogOverlay">
+        <section class="dialog-card" role="dialog" aria-modal="true" aria-labelledby="dialogTitle">
+          <p class="eyebrow">桌面提示</p>
+          <h3 id="dialogTitle">${esc(dialog.title || "提示")}</h3>
+          ${messageHtml}
+          ${field}
+          <div class="dialog-actions">
+            ${dialog.hideCancel ? "" : `<button class="button button-ghost" id="dialogCancelBtn">${esc(dialog.cancelLabel || "取消")}</button>`}
+            <button class="button button-primary" id="dialogConfirmBtn">${esc(dialog.confirmLabel || "确定")}</button>
+          </div>
+        </section>
+      </div>
+    `;
+    const getDialogValue = () => {
+      const input = document.getElementById("dialogInput");
+      return input ? input.value : dialog.defaultValue || "";
+    };
+    document.getElementById("dialogCancelBtn")?.addEventListener("click", () => resolveDialog({ confirmed: false, value: null }));
+    document.getElementById("dialogConfirmBtn")?.addEventListener("click", () => resolveDialog({ confirmed: true, value: getDialogValue() }));
+    document.getElementById("dialogOverlay")?.addEventListener("click", (event) => {
+      if (event.target?.id === "dialogOverlay" && dialog.kind !== "prompt") {
+        resolveDialog({ confirmed: false, value: null });
+      }
+    });
+    document.getElementById("dialogInput")?.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !dialog.multiline) {
+        event.preventDefault();
+        resolveDialog({ confirmed: true, value: getDialogValue() });
+      }
+    });
+    return;
+  }
   if (!state.closePromptOpen) {
     els.closePromptLayer.innerHTML = "";
     return;
@@ -904,7 +1074,7 @@ function render() {
   renderNav();
   renderHeader();
   renderBody();
-  renderClosePrompt();
+  renderOverlayLayer();
 }
 
 function renderShellFrame() {
@@ -1007,6 +1177,49 @@ function renderBody() {
   if (state.tab === "logs") updateLogsView(true);
   else restoreLogScroll();
   restoreChatScroll();
+  if (state.tab === "chat") scheduleChatMediaScrollSync();
+}
+
+function captureChatInputState() {
+  const input = document.getElementById("chatInput");
+  if (!input) return null;
+  const active = document.activeElement === input;
+  return {
+    active,
+    selectionStart: active ? input.selectionStart : null,
+    selectionEnd: active ? input.selectionEnd : null,
+    scrollTop: input.scrollTop,
+  };
+}
+
+function restoreChatInputState(snapshot) {
+  if (!snapshot) return;
+  const input = document.getElementById("chatInput");
+  if (!input) return;
+  input.value = state.chatDraft || "";
+  if (!snapshot.active || input.disabled) return;
+  input.focus();
+  if (typeof snapshot.selectionStart === "number" && typeof snapshot.selectionEnd === "number") {
+    input.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
+  }
+  input.scrollTop = Number(snapshot.scrollTop || 0);
+}
+
+function renderChatPagePartial(options = {}) {
+  if (state.tab !== "chat") {
+    renderBody();
+    return;
+  }
+  if (!state.bootstrap || !state.draft) {
+    renderShellLoading();
+    return;
+  }
+  const inputState = options.preserveInput ? captureChatInputState() : null;
+  els.content.innerHTML = pageChat();
+  bindPage();
+  restoreChatScroll();
+  scheduleChatMediaScrollSync();
+  restoreChatInputState(inputState);
 }
 
 function pageDashboard() {
@@ -1422,8 +1635,8 @@ function pageChat() {
         <header class="chat-stage-head">
           <div>
             <p class="eyebrow">聊天内容</p>
-            <h3>${esc(selected?.title || "未选择会话")}</h3>
-            <p class="muted">${esc(selected?.subtitle || "从左侧选择会话后，在这里查看消息流。")}</p>
+            <h3 title="${escAttr(selected?.title || "未选择会话")}">${esc(selected?.title || "未选择会话")}</h3>
+            <p class="muted" title="${escAttr(selected?.subtitle || "从左侧选择会话后，在这里查看消息流。")}">${esc(selected?.subtitle || "从左侧选择会话后，在这里查看消息流。")}</p>
           </div>
           <div class="chat-stage-meta">
             <span class="channel-badge">${esc(selected?.channel || "desktop")}</span>
@@ -1588,7 +1801,7 @@ function renderMcpCard(name, server) {
         </div>
         <span class="status-tag">${esc(type)}</span>
       </div>
-      <p class="catalog-desc">${esc(summary)}</p>
+      <p class="catalog-desc" title="${escAttr(summary)}">${esc(summary)}</p>
       <div class="catalog-meta mono-inline" title="${escAttr(summary)}">${esc(summary)}</div>
       <div class="catalog-foot"><span class="catalog-count mono-inline">tools ${toolCount || "*"}</span><button class="button button-ghost" data-remove-mcp="${escAttr(name)}">移除</button></div>
     </article>
@@ -1608,7 +1821,7 @@ function renderSkillCard(item) {
         </div>
         <span class="status-tag ${item.source === "workspace" ? "running" : ""}">${esc(sourceLabel)}</span>
       </div>
-      <p class="catalog-desc">${esc(description)}</p>
+      <p class="catalog-desc" title="${escAttr(description)}">${esc(description)}</p>
       <div class="catalog-meta mono-inline" title="${escAttr(item.path)}">${esc(item.path)}</div>
       <div class="catalog-foot">${item.editable ? `<button class="button button-ghost" data-delete-skill="${escAttr(item.name)}">删除</button>` : `<span></span>`}<span class="catalog-count mono-inline">触发方式 ${esc(triggerLabel)}</span></div>
     </article>
@@ -1679,10 +1892,10 @@ function gatewayStatusSummary() {
 function renderSessionList() {
   if (!state.sessions.length) return `<div class="session-empty">还没有可显示的会话。</div>`;
   return state.sessions.map((item) => `
-    <button class="session-card ${item.key === state.selectedSessionKey ? "active" : ""}" data-session-key="${escAttr(item.key)}">
+    <button class="session-card ${item.key === state.selectedSessionKey ? "active" : ""}" data-session-key="${escAttr(item.key)}" title="${escAttr(`${item.title}\n${item.subtitle || "暂无摘要"}`)}">
       <span class="session-accent"></span>
       <div class="session-badge">${esc((item.channel || "lo").slice(0, 2).toUpperCase())}</div>
-      <div class="session-copy"><strong>${esc(item.title)}</strong><p>${esc(item.subtitle || "暂无摘要")}</p><small>${esc(formatUpdatedAt(item.updatedAt))}</small></div>
+      <div class="session-copy"><strong title="${escAttr(item.title)}">${esc(item.title)}</strong><p title="${escAttr(item.subtitle || "暂无摘要")}">${esc(item.subtitle || "暂无摘要")}</p><small>${esc(formatUpdatedAt(item.updatedAt))}</small></div>
     </button>
   `).join("");
 }
@@ -1768,8 +1981,12 @@ function bindPage() {
   document.getElementById("deleteSessionBtn")?.addEventListener("click", deleteSelectedSession);
   document.getElementById("createSkillBtn")?.addEventListener("click", createSkill);
   document.getElementById("openSkillsEmptyBtn")?.addEventListener("click", () => openTarget("skills"));
-  document.getElementById("addMcpBtn")?.addEventListener("click", () => {
-    const name = window.prompt("请输入 MCP Server 名称");
+  document.getElementById("addMcpBtn")?.addEventListener("click", async () => {
+    const name = await showPromptDialog({
+      title: "新增 MCP Server",
+      message: "请输入 MCP Server 名称",
+      placeholder: "my-server",
+    });
     if (!name) return;
     state.draft.tools.mcpServers ||= {};
     if (!state.draft.tools.mcpServers[name]) state.draft.tools.mcpServers[name] = clone(state.bootstrap.schema.mcpServerTemplate);
@@ -1816,6 +2033,15 @@ function bindPage() {
 
   document.getElementById("gatewayLogPre")?.addEventListener("scroll", captureLogScroll);
   document.getElementById("chatFeed")?.addEventListener("scroll", captureChatScroll);
+  for (const image of document.querySelectorAll(".chat-inline-media-image")) {
+    image.addEventListener("click", () => openImagePreview(image.dataset.previewSrc, image.dataset.previewLabel));
+    const syncScroll = () => scheduleChatMediaScrollSync();
+    if (image.complete) syncScroll();
+    else {
+      image.addEventListener("load", syncScroll, { once: true });
+      image.addEventListener("error", syncScroll, { once: true });
+    }
+  }
 
   for (const input of document.querySelectorAll("[data-field-path]")) {
     const commitValue = () => {
@@ -1830,8 +2056,7 @@ function bindPage() {
         try {
           value = String(value).trim() ? JSON.parse(String(value)) : {};
         } catch (error) {
-          window.alert(`JSON 格式错误：${error.message}`);
-          input.focus();
+          void showAlertDialog(`JSON 格式错误：${error.message}`, { title: "JSON 格式错误" });
           return;
         }
       }
@@ -1903,6 +2128,16 @@ function restoreChatScroll() {
   if (!node) return;
   if (state.chatStickBottom) node.scrollTop = node.scrollHeight;
   else node.scrollTop = state.chatScrollTop;
+}
+
+function scheduleChatMediaScrollSync() {
+  if (state.tab !== "chat" || !state.chatStickBottom) return;
+  const sync = () => restoreChatScroll();
+  window.requestAnimationFrame(() => {
+    sync();
+    window.requestAnimationFrame(sync);
+  });
+  window.setTimeout(sync, 80);
 }
 
 function currentRefreshIntervalMs() {
@@ -2160,7 +2395,8 @@ function renderBubbleContent(item) {
       <div class="bubble-media-strip">
         ${parts.images.map((path) => {
           const name = path.replace(/\\/g, "/").split("/").pop() || path;
-          return `<figure class="chat-inline-media"><img src="${escAttr(mediaPreviewSrc(path))}" alt="${escAttr(name)}" loading="lazy"><figcaption>${esc(name)}</figcaption></figure>`;
+          const previewSrc = mediaPreviewSrc(path);
+          return `<figure class="chat-inline-media"><img class="chat-inline-media-image" src="${escAttr(previewSrc)}" data-preview-src="${escAttr(previewSrc)}" data-preview-label="${escAttr(name)}" alt="${escAttr(name)}" loading="lazy"><figcaption>${esc(name)}</figcaption></figure>`;
         }).join("")}
       </div>
     `);

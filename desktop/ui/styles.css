@@ -1289,6 +1289,115 @@ code {
   margin-top: 4px;
 }
 
+.dialog-card {
+  width: min(520px, calc(100vw - 32px));
+  display: grid;
+  gap: 14px;
+  padding: 24px;
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.2);
+}
+
+.dialog-card h3 {
+  margin: 0;
+  font-size: 1.28rem;
+  line-height: 1.15;
+}
+
+.dialog-message {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.dialog-input,
+.dialog-textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid var(--line-strong);
+  background: #fbfdff;
+  outline: none;
+  font: inherit;
+}
+
+.dialog-input:focus,
+.dialog-textarea:focus {
+  border-color: rgba(15, 118, 110, 0.45);
+  box-shadow: 0 0 0 4px rgba(20, 184, 166, 0.12);
+}
+
+.dialog-textarea {
+  min-height: 180px;
+  resize: vertical;
+  font-family: var(--mono);
+  line-height: 1.55;
+}
+
+.dialog-input[readonly],
+.dialog-textarea[readonly] {
+  background: #f8fafc;
+  color: #334155;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.image-preview-overlay {
+  z-index: 2100;
+}
+
+.image-preview-card {
+  width: min(1080px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  display: grid;
+  gap: 14px;
+  padding: 22px;
+  border: 1px solid rgba(226, 232, 240, 0.92);
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.24);
+}
+
+.image-preview-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: start;
+}
+
+.image-preview-head h3 {
+  margin: 0;
+  font-size: 1.2rem;
+}
+
+.image-preview-body {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  place-items: center;
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgba(248, 250, 252, 0.94), rgba(241, 245, 249, 0.92)),
+    radial-gradient(circle at top left, rgba(20, 184, 166, 0.08), transparent 28%);
+}
+
+.image-preview-image {
+  display: block;
+  max-width: 100%;
+  max-height: calc(100vh - 170px);
+  object-fit: contain;
+  border-radius: 18px;
+}
+
 .ai-stack {
   align-content: start;
   gap: 16px;
@@ -1974,6 +2083,7 @@ code {
   border-radius: 14px;
   border: 1px solid rgba(148, 163, 184, 0.24);
   background: rgba(255, 255, 255, 0.72);
+  cursor: zoom-in;
 }
 
 .chat-inline-media figcaption {
