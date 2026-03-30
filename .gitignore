@@ -31,5 +31,7 @@ desktop/src-tauri/target/
 desktop/build/
 desktop/dist/
 .codex-tauri-dev.log
+desktop/.bgbackend.log
+desktop/.tauri-dev.log
 desktop/src-tauri/tauri-dev.err.log
 desktop/src-tauri/tauri-dev.out.log

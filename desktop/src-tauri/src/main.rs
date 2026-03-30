@@ -6,17 +6,18 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
-use std::time::Instant;
 use std::time::Duration;
-use tauri::Manager;
+use std::time::Instant;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::Manager;
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-const DEFAULT_UPDATE_ENDPOINT: &str = "https://github.com/hw7622/nanobot-desktop/releases/latest/download/latest.json";
+const DEFAULT_UPDATE_ENDPOINT: &str =
+    "https://github.com/hw7622/nanobot-desktop/releases/latest/download/latest.json";
 const DEFAULT_UPDATE_CHANNEL: &str = "stable";
 const UPDATE_ENDPOINT_OVERRIDE: Option<&str> = option_env!("NANOBOT_DESKTOP_UPDATER_ENDPOINT");
 const UPDATE_PUBKEY: Option<&str> = option_env!("NANOBOT_DESKTOP_UPDATER_PUBKEY");
@@ -35,7 +36,6 @@ const TRAY_MENU_QUIT: &str = "tray-quit";
 struct BackendChild(Mutex<Option<Child>>);
 struct PendingUpdate(Mutex<Option<Update>>);
 struct ExitRequested(Mutex<bool>);
-
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -72,7 +72,14 @@ async fn updater_status(
     app: tauri::AppHandle,
     pending: tauri::State<'_, PendingUpdate>,
 ) -> Result<UpdateConfigPayload, String> {
-    Ok(build_update_status(&app, pending.0.lock().ok().and_then(|slot| slot.as_ref().map(update_payload))))
+    Ok(build_update_status(
+        &app,
+        pending
+            .0
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(update_payload)),
+    ))
 }
 
 #[tauri::command]
@@ -84,7 +91,11 @@ async fn check_for_updates(
     if settings.pubkey.is_none() {
         return Ok(build_update_status(
             &app,
-            pending.0.lock().ok().and_then(|slot| slot.as_ref().map(update_payload)),
+            pending
+                .0
+                .lock()
+                .ok()
+                .and_then(|slot| slot.as_ref().map(update_payload)),
         ));
     }
 
@@ -120,7 +131,10 @@ async fn install_update(
     pending: tauri::State<'_, PendingUpdate>,
 ) -> Result<UpdateConfigPayload, String> {
     let update = {
-        let mut slot = pending.0.lock().map_err(|_| "无法锁定更新状态".to_string())?;
+        let mut slot = pending
+            .0
+            .lock()
+            .map_err(|_| "无法锁定更新状态".to_string())?;
         slot.take()
     };
 
@@ -188,13 +202,16 @@ fn main() {
         .manage(ExitRequested(Mutex::new(false)))
         .setup(|app| {
             #[cfg(desktop)]
-            app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())?;
 
             setup_tray(app)?;
 
             if !cfg!(debug_assertions) {
                 let resource_roots = candidate_resource_roots(app);
-                let Some(backend_exe) = find_packaged_exe(&resource_roots, "backend", "nanobot-desktop-backend") else {
+                let Some(backend_exe) =
+                    find_packaged_exe(&resource_roots, "backend", "nanobot-desktop-backend")
+                else {
                     return Ok(());
                 };
                 let runtime_exe = find_packaged_exe(&resource_roots, "runtime", "nanobot-runtime");
@@ -203,6 +220,10 @@ fn main() {
                 command.stdout(Stdio::null()).stderr(Stdio::null());
                 #[cfg(windows)]
                 command.creation_flags(CREATE_NO_WINDOW);
+                command.env(
+                    "NANOBOT_DESKTOP_VERSION",
+                    app.package_info().version.to_string(),
+                );
                 if let Some(runtime_exe) = runtime_exe {
                     command.env("NANOBOT_DESKTOP_GATEWAY_BIN", runtime_exe);
                 }
@@ -225,36 +246,34 @@ fn main() {
             set_autostart,
             handle_close_action
         ])
-        .on_window_event(|window, event| {
-            match event {
-                tauri::WindowEvent::CloseRequested { api, .. } => {
-                    let exit_requested = window
-                        .state::<ExitRequested>()
-                        .0
-                        .lock()
-                        .map(|flag| *flag)
-                        .unwrap_or(false);
-                    if !exit_requested {
-                        api.prevent_close();
-                        if let Some(webview) = window.app_handle().get_webview_window("main") {
-                            let _ = webview.eval(close_prompt_script());
-                        }
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                let exit_requested = window
+                    .state::<ExitRequested>()
+                    .0
+                    .lock()
+                    .map(|flag| *flag)
+                    .unwrap_or(false);
+                if !exit_requested {
+                    api.prevent_close();
+                    if let Some(webview) = window.app_handle().get_webview_window("main") {
+                        let _ = webview.eval(close_prompt_script());
                     }
                 }
-                tauri::WindowEvent::Destroyed => {
-                    request_backend_shutdown();
-                    let state = window.state::<BackendChild>();
-                    let mut slot = match state.0.lock() {
-                        Ok(slot) => slot,
-                        Err(_) => return,
-                    };
-                    if let Some(child) = slot.as_mut() {
-                        let _ = child.kill();
-                    }
-                    *slot = None;
-                }
-                _ => {}
             }
+            tauri::WindowEvent::Destroyed => {
+                request_backend_shutdown();
+                let state = window.state::<BackendChild>();
+                let mut slot = match state.0.lock() {
+                    Ok(slot) => slot,
+                    Err(_) => return,
+                };
+                if let Some(child) = slot.as_mut() {
+                    let _ = child.kill();
+                }
+                *slot = None;
+            }
+            _ => {}
         })
         .run(tauri::generate_context!())
         .expect("error while running Nanobot Desktop");
@@ -271,22 +290,31 @@ fn setup_tray<R: tauri::Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
         .menu(&menu)
         .tooltip("Nanobot Desktop")
         .show_menu_on_left_click(false)
-        .on_menu_event(|app: &tauri::AppHandle<R>, event| match event.id().as_ref() {
-            TRAY_MENU_SHOW => {
-                let _ = show_main_window(app);
-            }
-            TRAY_MENU_QUIT => {
-                if let Ok(mut flag) = app.state::<ExitRequested>().0.lock() {
-                    *flag = true;
+        .on_menu_event(
+            |app: &tauri::AppHandle<R>, event| match event.id().as_ref() {
+                TRAY_MENU_SHOW => {
+                    let _ = show_main_window(app);
                 }
-                request_backend_shutdown();
-                app.exit(0);
-            }
-            _ => {}
-        })
+                TRAY_MENU_QUIT => {
+                    if let Ok(mut flag) = app.state::<ExitRequested>().0.lock() {
+                        *flag = true;
+                    }
+                    request_backend_shutdown();
+                    app.exit(0);
+                }
+                _ => {}
+            },
+        )
         .on_tray_icon_event(|tray: &tauri::tray::TrayIcon<R>, event| match event {
-            TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. }
-            | TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } => {
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            }
+            | TrayIconEvent::DoubleClick {
+                button: MouseButton::Left,
+                ..
+            } => {
                 let _ = show_main_window(tray.app_handle());
             }
             _ => {}
@@ -441,7 +469,10 @@ fn close_prompt_script() -> &'static str {
 "#
 }
 
-fn build_update_status(app: &tauri::AppHandle, pending: Option<UpdatePayload>) -> UpdateConfigPayload {
+fn build_update_status(
+    app: &tauri::AppHandle,
+    pending: Option<UpdatePayload>,
+) -> UpdateConfigPayload {
     let settings = updater_settings();
     UpdateConfigPayload {
         supported: true,
@@ -535,7 +566,10 @@ fn quoted_current_exe() -> Result<String, String> {
 #[cfg(windows)]
 fn run_reg_command(args: &[&str]) -> Result<std::process::Output, String> {
     let mut command = Command::new("reg");
-    command.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     command.creation_flags(CREATE_NO_WINDOW);
     command.output().map_err(|err| err.to_string())
 }

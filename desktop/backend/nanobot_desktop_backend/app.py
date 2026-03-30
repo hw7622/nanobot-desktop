@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import importlib.metadata
 import json
 import logging
 import mimetypes
@@ -22,6 +23,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from nanobot import __version__ as NANOBOT_VERSION
 from nanobot.config.schema import Config
 from nanobot.session.manager import SessionManager
 from nanobot_desktop_backend.chat_manager import ChatManager
@@ -739,6 +741,13 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
 
 
 def read_nanobot_version() -> str:
+    if NANOBOT_VERSION:
+        return str(NANOBOT_VERSION)
+    for package_name in ("nanobot-ai", "nanobot"):
+        try:
+            return importlib.metadata.version(package_name)
+        except importlib.metadata.PackageNotFoundError:
+            continue
     init_path = Path(__file__).resolve().parents[3] / "nanobot" / "__init__.py"
     if not init_path.exists():
         return "unknown"
@@ -747,11 +756,25 @@ def read_nanobot_version() -> str:
 
 
 def read_desktop_version() -> str:
-    cargo_toml = Path(__file__).resolve().parents[2] / "src-tauri" / "Cargo.toml"
-    if not cargo_toml.exists():
-        return "unknown"
-    match = re.search(r'^\s*version\s*=\s*"([^"]+)"', cargo_toml.read_text(encoding="utf-8", errors="replace"), re.MULTILINE)
-    return match.group(1) if match else "unknown"
+    env_version = str(os.environ.get("NANOBOT_DESKTOP_VERSION", "")).strip()
+    if env_version:
+        return env_version
+    candidate_paths = [
+        Path(__file__).resolve().parents[2] / "src-tauri" / "Cargo.toml",
+        Path(__file__).resolve().parents[2] / "src-tauri" / "tauri.conf.json",
+        Path(__file__).resolve().parents[2] / "package.json",
+    ]
+    for path in candidate_paths:
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if path.suffix == ".json":
+            match = re.search(r'"version"\s*:\s*"([^"]+)"', text)
+        else:
+            match = re.search(r'^\s*version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+        if match:
+            return match.group(1)
+    return "unknown"
 
 
 def build_server(host: str, port: int) -> ThreadingHTTPServer:
