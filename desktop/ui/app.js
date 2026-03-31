@@ -167,6 +167,9 @@ async function refreshBootstrap() {
   ensureDesktopConfig(state.bootstrap.config);
   ensureDesktopConfig(state.draft);
   state.provider = state.draft.agents.defaults.provider || "openrouter";
+  // Bootstrap per-provider model memory from persisted config
+  const bootModel = state.draft.providers[state.provider]?.model;
+  if (bootModel) applyValue("agents.defaults.model", bootModel);
   applyWeixinStatus(payload.weixin || {});
   await refreshLogs();
   await refreshSessions();
@@ -2061,8 +2064,16 @@ function bindPage() {
         }
       }
       applyValue(input.dataset.fieldPath, value);
-      if (state.tab === "ai" && input.dataset.fieldPath === "agents.defaults.provider") state.provider = value;
       if (state.tab === "ai" && input.dataset.fieldPath === "agents.defaults.provider") {
+        const prevProvider = state.provider;
+        const prevModel = getValue(state.draft.agents.defaults, "model") || "";
+        if (prevProvider && prevModel) {
+          const prevPcfg = state.draft.providers[prevProvider];
+          if (prevPcfg) prevPcfg.model = prevModel;
+        }
+        state.provider = value;
+        const restored = state.draft.providers[value]?.model;
+        applyValue("agents.defaults.model", restored || "");
         render();
         return;
       }
