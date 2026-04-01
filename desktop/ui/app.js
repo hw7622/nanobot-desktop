@@ -696,9 +696,11 @@ async function archiveAndNewSession() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key: sessionKey }),
     });
-    await refreshSessions();
+    // Re-create the empty session first so it reappears in the list,
+    // then refresh the UI with the original key still selected.
     await refreshSelectedSession();
-    await refreshSessionArchives();
+    await refreshSessions();
+    await refreshSessionArchives(sessionKey);
     state.chatStickBottom = true;
   } catch (error) {
     await showAlertDialog(`归档会话失败：${error.message || error}`, { title: "归档失败" });
@@ -708,8 +710,8 @@ async function archiveAndNewSession() {
   }
 }
 
-async function refreshSessionArchives() {
-  const sessionKey = String(state.selectedSessionKey || "").trim();
+async function refreshSessionArchives(explicitKey) {
+  const sessionKey = String(explicitKey || state.selectedSessionKey || "").trim();
   try {
     const payload = await fetchJson(`/api/session/archives?key=${encodeURIComponent(sessionKey)}`);
     state.sessionArchives = payload.items || [];
