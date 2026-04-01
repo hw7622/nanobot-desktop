@@ -71,6 +71,8 @@ const state = {
   chatRefreshQueued: false,
   chatRefreshQueuedManual: false,
   sessionActionBusy: "",
+  sessionArchives: [],
+  archivesExpanded: false,
   closePromptOpen: false,
   closePromptBypass: false,
   imagePreview: null,
@@ -638,6 +640,102 @@ async function deleteSelectedSession() {
     state.chatStickBottom = true;
   } catch (error) {
     await showAlertDialog(`删除会话失败：${error.message || error}`, { title: "删除会话失败" });
+  } finally {
+    state.sessionActionBusy = "";
+    renderChatPagePartial({ preserveInput: true });
+  }
+}
+
+async function truncateSelectedSession() {
+  const sessionKey = String(state.selectedSessionKey || "").trim();
+  if (!sessionKey || state.chatBusy || state.sessionActionBusy) return;
+  const label = state.selectedSession?.title || sessionKey;
+  const keep = await showPromptDialog({
+    title: "截断历史消息",
+    message: `将保留会话"${label}"中最近的 N 条消息，更早的消息会被永久删除。`,
+    placeholder: "50",
+    defaultValue: "50",
+    confirmLabel: "截断",
+  });
+  if (!keep) return;
+  const n = parseInt(keep, 10);
+  if (isNaN(n) || n < 0) {
+    await showAlertDialog("请输入有效的正整数。", { title: "参数错误" });
+    return;
+  }
+  state.sessionActionBusy = "truncate";
+  renderChatPagePartial({ preserveInput: true });
+  try {
+    const payload = await fetchJson("/api/session/truncate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: sessionKey, keep: n }),
+    });
+    state.selectedSession = payload.session || state.selectedSession;
+    state.selectedSessionItems = payload.items || [];
+    state.chatStickBottom = true;
+    await refreshSessions();
+  } catch (error) {
+    await showAlertDialog(`截断会话失败：${error.message || error}`, { title: "截断失败" });
+  } finally {
+    state.sessionActionBusy = "";
+    renderChatPagePartial({ preserveInput: true });
+  }
+}
+
+async function archiveAndNewSession() {
+  const sessionKey = String(state.selectedSessionKey || "").trim();
+  if (!sessionKey || sessionKey === "desktop:console" || state.chatBusy || state.sessionActionBusy) return;
+  const label = state.selectedSession?.title || sessionKey;
+  if (!await showConfirmDialog(`确定归档会话"${label}"并新建空会话吗？归档后可随时恢复。`, { title: "归档并新建会话" })) return;
+  state.sessionActionBusy = "archive";
+  renderChatPagePartial({ preserveInput: true });
+  try {
+    await fetchJson("/api/session/archive", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: sessionKey }),
+    });
+    await refreshSessions();
+    await refreshSelectedSession();
+    await refreshSessionArchives();
+    state.chatStickBottom = true;
+  } catch (error) {
+    await showAlertDialog(`归档会话失败：${error.message || error}`, { title: "归档失败" });
+  } finally {
+    state.sessionActionBusy = "";
+    renderChatPagePartial({ preserveInput: true });
+  }
+}
+
+async function refreshSessionArchives() {
+  const sessionKey = String(state.selectedSessionKey || "").trim();
+  try {
+    const payload = await fetchJson(`/api/session/archives?key=${encodeURIComponent(sessionKey)}`);
+    state.sessionArchives = payload.items || [];
+  } catch {
+    state.sessionArchives = [];
+  }
+}
+
+async function restoreArchivedSession(archivePath) {
+  if (state.chatBusy || state.sessionActionBusy) return;
+  if (!await showConfirmDialog("恢复此归档会话将替换当前活跃会话。当前会话会自动归档。确定恢复？", { title: "恢复归档会话" })) return;
+  state.sessionActionBusy = "restore";
+  renderChatPagePartial({ preserveInput: true });
+  try {
+    const payload = await fetchJson("/api/session/restore", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ archive_path: archivePath }),
+    });
+    state.selectedSession = payload.session || state.selectedSession;
+    state.selectedSessionItems = payload.items || [];
+    state.chatStickBottom = true;
+    await refreshSessions();
+    await refreshSessionArchives();
+  } catch (error) {
+    await showAlertDialog(`恢复会话失败：${error.message || error}`, { title: "恢复失败" });
   } finally {
     state.sessionActionBusy = "";
     renderChatPagePartial({ preserveInput: true });
@@ -1622,6 +1720,7 @@ function pageChat() {
   const readonly = selected ? selected.readonly : true;
   const isDesktopSession = String(selected?.key || state.selectedSessionKey || "") === "desktop:console";
   const clearLabel = isDesktopSession ? "清空测试会话" : "清空会话";
+  const messageCount = state.selectedSessionItems.length;
   return `
     <div class="chat-page immersive">
       <aside class="chat-rail">
@@ -1633,6 +1732,12 @@ function pageChat() {
           <span class="pill">${state.sessions.length}</span>
         </div>
         <div class="session-list">${renderSessionList()}</div>
+        ${selected && !isDesktopSession ? `
+          <div class="session-list-actions">
+            <button class="button button-ghost" id="archiveNewBtn" ${state.sessionActionBusy ? "disabled" : ""}>${state.sessionActionBusy === "archive" ? "归档中..." : "归档并新建会话"}</button>
+          </div>
+        ` : ""}
+        ${renderArchivesSection()}
       </aside>
       <section class="chat-stage">
         <header class="chat-stage-head">
@@ -1643,8 +1748,10 @@ function pageChat() {
           </div>
           <div class="chat-stage-meta">
             <span class="channel-badge">${esc(selected?.channel || "desktop")}</span>
+            <span class="pill">${messageCount} 条消息</span>
             <button class="button button-ghost" id="refreshChatBtn" ${state.chatManualRefreshBusy ? "disabled" : ""}>${state.chatManualRefreshBusy ? "刷新中..." : "刷新"}</button>
             ${selected ? `<button class="button button-ghost" id="clearSessionBtn" ${(state.chatBusy || state.sessionActionBusy) ? "disabled" : ""}>${state.sessionActionBusy === "clear" ? "清空中..." : clearLabel}</button>` : ""}
+            ${selected ? `<button class="button button-ghost" id="truncateSessionBtn" ${(state.chatBusy || state.sessionActionBusy) ? "disabled" : ""}>${state.sessionActionBusy === "truncate" ? "截断中..." : "截断历史"}</button>` : ""}
             ${selected && !isDesktopSession ? `<button class="button button-ghost danger" id="deleteSessionBtn" ${state.sessionActionBusy ? "disabled" : ""}>${state.sessionActionBusy === "delete" ? "删除中..." : "删除会话"}</button>` : ""}
             ${readonly ? `<span class="pill">只读</span>` : ``}
           </div>
@@ -1892,6 +1999,28 @@ function gatewayStatusSummary() {
   return "Gateway 未运行";
 }
 
+function renderArchivesSection() {
+  if (!state.archivesExpanded) {
+    return `<button class="button button-ghost session-archives-toggle" id="toggleArchivesBtn">归档会话 (${state.sessionArchives.length})</button>`;
+  }
+  const items = state.sessionArchives;
+  return `
+    <div class="session-archives-section">
+      <button class="button button-ghost session-archives-toggle" id="toggleArchivesBtn">归档会话 (${items.length}) ▴</button>
+      ${items.length ? items.map((item) => `
+        <button class="session-card archive-card" data-restore-archive="${escAttr(item.path)}" title="${escAttr(item.name)}">
+          <span class="session-accent"></span>
+          <div class="session-badge">BA</div>
+          <div class="session-copy">
+            <strong>归档 · ${esc(item.messageCount ?? "?")} 条消息</strong>
+            <p>${esc(formatUpdatedAt(item.updatedAt))}</p>
+          </div>
+        </button>
+      `).join("") : `<div class="session-empty">暂无归档会话。</div>`}
+    </div>
+  `;
+}
+
 function renderSessionList() {
   if (!state.sessions.length) return `<div class="session-empty">还没有可显示的会话。</div>`;
   return state.sessions.map((item) => `
@@ -1976,12 +2105,22 @@ function bindPage() {
   for (const button of document.querySelectorAll("[data-gateway]")) button.onclick = () => gatewayAction(button.dataset.gateway);
   for (const button of document.querySelectorAll("[data-delete-skill]")) button.onclick = () => deleteSkill(button.dataset.deleteSkill);
   for (const button of document.querySelectorAll("[data-remove-mcp]")) button.onclick = () => { delete (state.draft.tools.mcpServers || {})[button.dataset.removeMcp]; state.restartRecommended = true; render(); };
+  for (const button of document.querySelectorAll("[data-restore-archive]")) button.onclick = () => restoreArchivedSession(button.dataset.restoreArchive);
 
   document.getElementById("refreshChatBtn")?.addEventListener("click", async () => { await refreshChatData({ force: true, manual: true }); });
   document.getElementById("sendChatBtn")?.addEventListener("click", sendChatMessage);
   document.getElementById("clearChatBtn")?.addEventListener("click", clearChatHistory);
   document.getElementById("clearSessionBtn")?.addEventListener("click", clearSelectedSession);
+  document.getElementById("truncateSessionBtn")?.addEventListener("click", truncateSelectedSession);
   document.getElementById("deleteSessionBtn")?.addEventListener("click", deleteSelectedSession);
+  document.getElementById("archiveNewBtn")?.addEventListener("click", archiveAndNewSession);
+  document.getElementById("toggleArchivesBtn")?.addEventListener("click", async () => {
+    if (!state.archivesExpanded) {
+      await refreshSessionArchives();
+    }
+    state.archivesExpanded = !state.archivesExpanded;
+    renderChatPagePartial({ preserveInput: true });
+  });
   document.getElementById("createSkillBtn")?.addEventListener("click", createSkill);
   document.getElementById("openSkillsEmptyBtn")?.addEventListener("click", () => openTarget("skills"));
   document.getElementById("addMcpBtn")?.addEventListener("click", async () => {

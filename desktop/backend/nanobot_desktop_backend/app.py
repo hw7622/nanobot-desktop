@@ -343,6 +343,10 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/sessions":
             self._json({"ok": True, "items": list_sessions()})
             return
+        if parsed.path == "/api/session/archives":
+            key = parse_qs(parsed.query).get("key", [""])[0]
+            self._json({"ok": True, "items": list_archived_sessions(key)})
+            return
         if parsed.path == "/api/session":
             key = parse_qs(parsed.query).get("key", [""])[0]
             self._json({"ok": True, **load_session_payload(key)})
@@ -413,6 +417,55 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/chat/clear":
             self._json({"ok": True, "items": self.state.chat.clear()})
+            return
+        if parsed.path == "/api/session/truncate":
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            session_key = str(payload.get("key") or "").strip()
+            keep = int(payload.get("keep") or 50)
+            if not session_key:
+                self._json({"error": "missing session key"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                result = truncate_session_payload(session_key, keep)
+            except ValueError as error:
+                self._json({"error": str(error)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            self._json({"ok": True, **result})
+            return
+        if parsed.path == "/api/session/archive":
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            session_key = str(payload.get("key") or "").strip()
+            if not session_key:
+                self._json({"error": "missing session key"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                archive_session(session_key)
+            except FileNotFoundError:
+                self._json({"error": "session not found"}, status=HTTPStatus.NOT_FOUND)
+                return
+            self._json({"ok": True, "items": list_archived_sessions(session_key)})
+            return
+        if parsed.path == "/api/session/restore":
+            payload = self._read_json_body()
+            if payload is None:
+                return
+            archive_path = str(payload.get("archive_path") or "").strip()
+            if not archive_path:
+                self._json({"error": "missing archive_path"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                result = restore_session(archive_path)
+            except FileNotFoundError as error:
+                self._json({"error": str(error)}, status=HTTPStatus.NOT_FOUND)
+                return
+            except ValueError as error:
+                self._json({"error": str(error)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            self._json({"ok": True, **result})
             return
         if parsed.path == "/api/session/clear":
             payload = self._read_json_body()
@@ -868,6 +921,126 @@ def delete_session_payload(key: str) -> dict[str, Any]:
     manager = SessionManager(cfg.workspace_path)
     deleted = manager.delete_session(session_key)
     return {"deleted": deleted}
+
+
+def _get_sessions_dir() -> Path:
+    cfg = Config.model_validate(load_core_runtime_config())
+    return SessionManager(cfg.workspace_path).sessions_dir
+
+
+def truncate_session_payload(key: str, keep: int) -> dict[str, Any]:
+    session_key = (key or "").strip()
+    if not session_key:
+        raise ValueError("missing session key")
+    keep = max(0, keep)
+    cfg = Config.model_validate(load_core_runtime_config())
+    manager = SessionManager(cfg.workspace_path)
+    session = manager.get_or_create(session_key)
+    session.retain_recent_legal_suffix(keep)
+    manager.save(session)
+    return load_session_payload(session_key)
+
+
+def _safe_key_for_filename(key: str) -> str:
+    from nanobot.utils.helpers import safe_filename
+    return safe_filename(key.replace(":", "_"))
+
+
+def _archive_path_for_key(key: str, sessions_dir: Path) -> Path:
+    safe_key = _safe_key_for_filename(key)
+    ts = datetime.now().strftime("%Y%m%d%H%M%S")
+    return sessions_dir / f"{safe_key}.{ts}.jsonl.bak"
+
+
+def archive_session(key: str) -> None:
+    session_key = (key or "").strip()
+    if not session_key:
+        raise ValueError("missing session key")
+    sessions_dir = _get_sessions_dir()
+    safe_key = _safe_key_for_filename(session_key)
+    src = sessions_dir / f"{safe_key}.jsonl"
+    if not src.exists():
+        raise FileNotFoundError(f"session file not found: {src}")
+    dst = _archive_path_for_key(session_key, sessions_dir)
+    src.rename(dst)
+
+
+def restore_session(archive_path: str) -> dict[str, Any]:
+    sessions_dir = _get_sessions_dir()
+    target = Path(archive_path).resolve()
+    if not str(target).startswith(str(sessions_dir.resolve())):
+        raise ValueError("archive path outside sessions directory")
+    if not target.exists() or not target.name.endswith(".jsonl.bak"):
+        raise FileNotFoundError(f"archive not found: {archive_path}")
+
+    # Read the key from the archive's metadata line
+    key = ""
+    with open(target, encoding="utf-8") as f:
+        first_line = f.readline().strip()
+        if first_line:
+            try:
+                meta = json.loads(first_line)
+                if meta.get("_type") == "metadata":
+                    key = str(meta.get("key", ""))
+            except json.JSONDecodeError:
+                pass
+
+    # Archive current session if it exists
+    if key:
+        safe_key = _safe_key_for_filename(key)
+        current = sessions_dir / f"{safe_key}.jsonl"
+        if current.exists():
+            backup = _archive_path_for_key(key, sessions_dir)
+            current.rename(backup)
+
+    # Restore the archive
+    restored_name = target.name.replace(".jsonl.bak", ".jsonl")
+    restored_path = sessions_dir / restored_name
+    target.rename(restored_path)
+
+    if key:
+        cfg = Config.model_validate(load_core_runtime_config())
+        manager = SessionManager(cfg.workspace_path)
+        manager.invalidate(key)
+        return load_session_payload(key)
+    return load_session_payload("")
+
+
+def list_archived_sessions(key: str = "") -> list[dict[str, Any]]:
+    sessions_dir = _get_sessions_dir()
+    archives: list[dict[str, Any]] = []
+
+    if key:
+        safe_key = _safe_key_for_filename(key)
+        pattern = f"{safe_key}.*.jsonl.bak"
+    else:
+        pattern = "*.jsonl.bak"
+
+    for path in sorted(sessions_dir.glob(pattern), reverse=True):
+        info: dict[str, Any] = {
+            "path": str(path),
+            "name": path.name,
+            "size": path.stat().st_size,
+            "updatedAt": path.stat().st_mtime,
+        }
+        try:
+            with open(path, encoding="utf-8") as f:
+                first_line = f.readline().strip()
+                if first_line:
+                    meta = json.loads(first_line)
+                    if meta.get("_type") == "metadata":
+                        info["key"] = meta.get("key", "")
+                        info["createdAt"] = meta.get("created_at", "")
+                # Count message lines
+                count = 0
+                for line in f:
+                    if line.strip() and not line.strip().startswith('{"_type":'):
+                        count += 1
+                info["messageCount"] = count
+        except (json.JSONDecodeError, OSError):
+            pass
+        archives.append(info)
+    return archives
 
 
 def serialize_session_summary(item: dict[str, Any]) -> dict[str, Any]:

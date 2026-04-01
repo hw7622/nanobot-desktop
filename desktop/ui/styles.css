@@ -1938,6 +1938,46 @@ code {
   white-space: nowrap;
 }
 
+.session-list-actions {
+  padding: 8px 12px;
+  border-top: 1px solid var(--line);
+}
+
+.session-list-actions .button {
+  width: 100%;
+  font-size: 0.78rem;
+}
+
+.session-archives-toggle {
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 0.78rem;
+  border-top: 1px solid var(--line);
+}
+
+.session-archives-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.session-archives-section .session-archives-toggle {
+  border-bottom: 1px solid var(--line);
+}
+
+.archive-card {
+  opacity: 0.7;
+}
+
+.archive-card:hover {
+  opacity: 1;
+}
+
+.archive-card .session-badge {
+  background: #fef3c7;
+  color: #92400e;
+}
+
 .chat-stage {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
