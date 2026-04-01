@@ -444,6 +444,8 @@ class DesktopRequestHandler(BaseHTTPRequestHandler):
                 return
             try:
                 archive_session(session_key)
+                # Persist a new empty session so it reappears in the list
+                _ensure_empty_session(session_key)
             except FileNotFoundError:
                 self._json({"error": "session not found"}, status=HTTPStatus.NOT_FOUND)
                 return
@@ -965,6 +967,14 @@ def archive_session(key: str) -> None:
     src.rename(dst)
 
 
+def _ensure_empty_session(key: str) -> None:
+    """Create and persist an empty session file on disk."""
+    cfg = Config.model_validate(load_core_runtime_config())
+    manager = SessionManager(cfg.workspace_path)
+    session = manager.get_or_create(key)
+    manager.save(session)
+
+
 def restore_session(archive_path: str) -> dict[str, Any]:
     sessions_dir = _get_sessions_dir()
     target = Path(archive_path).resolve()
@@ -1010,11 +1020,7 @@ def list_archived_sessions(key: str = "") -> list[dict[str, Any]]:
     sessions_dir = _get_sessions_dir()
     archives: list[dict[str, Any]] = []
 
-    if key:
-        safe_key = _safe_key_for_filename(key)
-        pattern = f"{safe_key}.*.jsonl.bak"
-    else:
-        pattern = "*.jsonl.bak"
+    pattern = "*.jsonl.bak"
 
     for path in sorted(sessions_dir.glob(pattern), reverse=True):
         info: dict[str, Any] = {
@@ -1031,6 +1037,12 @@ def list_archived_sessions(key: str = "") -> list[dict[str, Any]]:
                     if meta.get("_type") == "metadata":
                         info["key"] = meta.get("key", "")
                         info["createdAt"] = meta.get("created_at", "")
+                        channel, _, chat_id = (info.get("key", "")).partition(":")
+                        title, _ = session_title(channel, chat_id)
+                        info["title"] = title
+                        channel, _, chat_id = info["key"].partition(":")
+                        title, _ = session_title(channel, chat_id)
+                        info["title"] = title
                 # Count message lines
                 count = 0
                 for line in f:

@@ -711,9 +711,8 @@ async function archiveAndNewSession() {
 }
 
 async function refreshSessionArchives(explicitKey) {
-  const sessionKey = String(explicitKey || state.selectedSessionKey || "").trim();
   try {
-    const payload = await fetchJson(`/api/session/archives?key=${encodeURIComponent(sessionKey)}`);
+    const payload = await fetchJson("/api/session/archives");
     state.sessionArchives = payload.items || [];
   } catch {
     state.sessionArchives = [];
@@ -2014,8 +2013,8 @@ function renderArchivesSection() {
           <span class="session-accent"></span>
           <div class="session-badge">BA</div>
           <div class="session-copy">
-            <strong>归档 · ${esc(item.messageCount ?? "?")} 条消息</strong>
-            <p>${esc(formatUpdatedAt(item.updatedAt))}</p>
+            <strong>${esc(item.messageCount ?? "?")} 条消息 · ${esc(formatUpdatedAt(item.updatedAt))}</strong>
+            <p>${esc(item.key || item.name)}</p>
           </div>
         </button>
       `).join("") : `<div class="session-empty">暂无归档会话。</div>`}
