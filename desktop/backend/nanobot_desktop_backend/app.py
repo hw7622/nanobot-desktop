@@ -996,17 +996,21 @@ def restore_session(archive_path: str) -> dict[str, Any]:
                 pass
 
     # Archive current session if it exists
-    if key:
-        safe_key = _safe_key_for_filename(key)
+    safe_key = _safe_key_for_filename(key) if key else ""
+    if safe_key:
         current = sessions_dir / f"{safe_key}.jsonl"
         if current.exists():
             backup = _archive_path_for_key(key, sessions_dir)
             current.rename(backup)
 
-    # Restore the archive
-    restored_name = target.name.replace(".jsonl.bak", ".jsonl")
-    restored_path = sessions_dir / restored_name
-    target.rename(restored_path)
+    # Restore the archive to the correct session filename (without timestamp)
+    if safe_key:
+        restored_path = sessions_dir / f"{safe_key}.jsonl"
+        target.rename(restored_path)
+    else:
+        restored_name = target.name.replace(".jsonl.bak", ".jsonl")
+        restored_path = sessions_dir / restored_name
+        target.rename(restored_path)
 
     if key:
         cfg = Config.model_validate(load_core_runtime_config())
