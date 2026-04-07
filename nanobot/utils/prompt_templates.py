@@ -14,11 +14,19 @@ from jinja2 import Environment, FileSystemLoader
 _TEMPLATES_ROOT = Path(__file__).resolve().parent.parent / "templates"
 
 
+def _strip_unc_prefix(p: Path) -> str:
+    """Remove the ``\\\\?\\\\`` extended-length path prefix on Windows so Jinja2 can find files."""
+    s = str(p)
+    if s.startswith("\\\\?\\"):
+        s = s[4:]
+    return s
+
+
 @lru_cache
 def _environment() -> Environment:
     # Plain-text prompts: do not HTML-escape variable values.
     return Environment(
-        loader=FileSystemLoader(str(_TEMPLATES_ROOT)),
+        loader=FileSystemLoader(_strip_unc_prefix(_TEMPLATES_ROOT)),
         autoescape=False,
         trim_blocks=True,
         lstrip_blocks=True,
