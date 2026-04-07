@@ -27,14 +27,6 @@ def get_desktop_state_path() -> Path:
     return get_desktop_dir() / "state.json"
 
 
-def get_desktop_plugins_dir() -> Path:
-    return _ensure_dir(get_desktop_dir() / "plugins")
-
-
-def get_weixin_plugin_dir() -> Path:
-    return get_desktop_plugins_dir() / "nanobot-weixin-plugin"
-
-
 def get_config_path() -> Path:
     """Return the official nanobot core config path."""
     return get_core_config_path()
