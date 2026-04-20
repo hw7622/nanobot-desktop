@@ -109,15 +109,18 @@ class SessionManager:
         self.legacy_sessions_dir = get_legacy_sessions_dir()
         self._cache: dict[str, Session] = {}
 
+    @staticmethod
+    def safe_key(key: str) -> str:
+        """Public helper used by HTTP handlers to map an arbitrary key to a stable filename stem."""
+        return safe_filename(key.replace(":", "_"))
+
     def _get_session_path(self, key: str) -> Path:
         """Get the file path for a session."""
-        safe_key = safe_filename(key.replace(":", "_"))
-        return self.sessions_dir / f"{safe_key}.jsonl"
+        return self.sessions_dir / f"{self.safe_key(key)}.jsonl"
 
     def _get_legacy_session_path(self, key: str) -> Path:
         """Legacy global session path (~/.nanobot/sessions/)."""
-        safe_key = safe_filename(key.replace(":", "_"))
-        return self.legacy_sessions_dir / f"{safe_key}.jsonl"
+        return self.legacy_sessions_dir / f"{self.safe_key(key)}.jsonl"
 
     def get_or_create(self, key: str) -> Session:
         """
@@ -158,6 +161,7 @@ class SessionManager:
             messages = []
             metadata = {}
             created_at = None
+            updated_at = None
             last_consolidated = 0
 
             with open(path, encoding="utf-8") as f:
@@ -171,6 +175,7 @@ class SessionManager:
                     if data.get("_type") == "metadata":
                         metadata = data.get("metadata", {})
                         created_at = datetime.fromisoformat(data["created_at"]) if data.get("created_at") else None
+                        updated_at = datetime.fromisoformat(data["updated_at"]) if data.get("updated_at") else None
                         last_consolidated = data.get("last_consolidated", 0)
                     else:
                         messages.append(data)
@@ -179,24 +184,96 @@ class SessionManager:
                 key=key,
                 messages=messages,
                 created_at=created_at or datetime.now(),
+                updated_at=updated_at or datetime.now(),
                 metadata=metadata,
                 last_consolidated=last_consolidated
             )
         except Exception as e:
             logger.warning("Failed to load session {}: {}", key, e)
+            repaired = self._repair(key)
+            if repaired is not None:
+                logger.info("Recovered session {} from corrupt file ({} messages)", key, len(repaired.messages))
+            return repaired
+
+    def _repair(self, key: str) -> Session | None:
+        """Attempt to recover a session from a corrupt JSONL file."""
+        path = self._get_session_path(key)
+        if not path.exists():
             return None
 
-    def save(self, session: Session) -> None:
-        """Save a session to disk."""
-        path = self._get_session_path(session.key)
+        try:
+            messages: list[dict[str, Any]] = []
+            metadata: dict[str, Any] = {}
+            created_at: datetime | None = None
+            updated_at: datetime | None = None
+            last_consolidated = 0
+            skipped = 0
 
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        skipped += 1
+                        continue
+
+                    if data.get("_type") == "metadata":
+                        metadata = data.get("metadata", {})
+                        if data.get("created_at"):
+                            try:
+                                created_at = datetime.fromisoformat(data["created_at"])
+                            except (ValueError, TypeError):
+                                pass
+                        if data.get("updated_at"):
+                            try:
+                                updated_at = datetime.fromisoformat(data["updated_at"])
+                            except (ValueError, TypeError):
+                                pass
+                        last_consolidated = data.get("last_consolidated", 0)
+                    else:
+                        messages.append(data)
+
+            if skipped:
+                logger.warning("Skipped {} corrupt lines in session {}", skipped, key)
+
+            if not messages and not metadata:
+                return None
+
+            return Session(
+                key=key,
+                messages=messages,
+                created_at=created_at or datetime.now(),
+                updated_at=updated_at or datetime.now(),
+                metadata=metadata,
+                last_consolidated=last_consolidated
+            )
+        except Exception as e:
+            logger.warning("Repair failed for session {}: {}", key, e)
+            return None
+
+    @staticmethod
+    def _session_payload(session: Session) -> dict[str, Any]:
+        return {
+            "key": session.key,
+            "created_at": session.created_at.isoformat(),
+            "updated_at": session.updated_at.isoformat(),
+            "metadata": session.metadata,
+            "messages": session.messages,
+        }
+
+    def save(self, session: Session) -> None:
+        """Save a session to disk atomically with retry on Windows."""
+        path = self._get_session_path(session.key)
         metadata_line = {
             "_type": "metadata",
             "key": session.key,
             "created_at": session.created_at.isoformat(),
             "updated_at": session.updated_at.isoformat(),
             "metadata": session.metadata,
-            "last_consolidated": session.last_consolidated
+            "last_consolidated": session.last_consolidated,
         }
         payload_lines = [json.dumps(metadata_line, ensure_ascii=False)]
         payload_lines.extend(json.dumps(msg, ensure_ascii=False) for msg in session.messages)
@@ -262,9 +339,48 @@ class SessionManager:
                 if path.exists():
                     path.unlink()
                     removed = True
-            except FileNotFoundError:
+            except (FileNotFoundError, OSError):
                 continue
         return removed
+
+    def read_session_file(self, key: str) -> dict[str, Any] | None:
+        """Load a session from disk without caching; intended for read-only HTTP endpoints."""
+        path = self._get_session_path(key)
+        if not path.exists():
+            return None
+        try:
+            messages: list[dict[str, Any]] = []
+            metadata: dict[str, Any] = {}
+            created_at: str | None = None
+            updated_at: str | None = None
+            stored_key: str | None = None
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    if data.get("_type") == "metadata":
+                        metadata = data.get("metadata", {})
+                        created_at = data.get("created_at")
+                        updated_at = data.get("updated_at")
+                        stored_key = data.get("key")
+                    else:
+                        messages.append(data)
+            return {
+                "key": stored_key or key,
+                "created_at": created_at,
+                "updated_at": updated_at,
+                "metadata": metadata,
+                "messages": messages,
+            }
+        except Exception as e:
+            logger.warning("Failed to read session {}: {}", key, e)
+            repaired = self._repair(key)
+            if repaired is not None:
+                logger.info("Recovered read-only session view {} from corrupt file", key)
+                return self._session_payload(repaired)
+            return None
 
     def list_sessions(self) -> list[dict[str, Any]]:
         """
@@ -276,6 +392,7 @@ class SessionManager:
         sessions = []
 
         for path in self.sessions_dir.glob("*.jsonl"):
+            fallback_key = path.stem.replace("_", ":", 1)
             try:
                 # Read just the metadata line
                 with open(path, encoding="utf-8") as f:
@@ -291,6 +408,14 @@ class SessionManager:
                                 "path": str(path)
                             })
             except Exception:
+                repaired = self._repair(fallback_key)
+                if repaired is not None:
+                    sessions.append({
+                        "key": repaired.key,
+                        "created_at": repaired.created_at.isoformat(),
+                        "updated_at": repaired.updated_at.isoformat(),
+                        "path": str(path)
+                    })
                 continue
 
         return sorted(sessions, key=lambda x: x.get("updated_at", ""), reverse=True)
