@@ -257,9 +257,6 @@ class DesktopState:
         self.schema = build_schema()
         self._maybe_start_gateway()
 
-    def shutdown(self) -> None:
-        self.chat.shutdown()
-
     def bootstrap(self) -> dict[str, Any]:
         gateway_status = self.gateway.status()
         return {
@@ -300,6 +297,11 @@ class DesktopState:
             logging.getLogger("nanobot_desktop").exception("Failed to auto-start gateway during desktop bootstrap")
 
     def shutdown(self) -> None:
+        try:
+            self.chat.shutdown()
+        except Exception:
+            logging.getLogger("nanobot_desktop").exception("Failed to stop desktop chat during desktop shutdown")
+
         self.weixin.cancel_login()
 
         try:

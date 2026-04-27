@@ -111,6 +111,7 @@ class ProviderConfig(Base):
 
     api_key: str | None = None
     api_base: str | None = None
+    timeout_seconds: float | None = None
     extra_headers: dict[str, str] | None = None  # Custom headers (e.g. APP-Code for AiHubMix)
 
 

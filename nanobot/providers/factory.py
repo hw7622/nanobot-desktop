@@ -67,6 +67,7 @@ def make_provider(config: Config) -> LLMProvider:
             api_key=p.api_key if p else None,
             api_base=config.get_api_base(model),
             default_model=model,
+            timeout_seconds=p.timeout_seconds if p else None,
             extra_headers=p.extra_headers if p else None,
             spec=spec,
         )

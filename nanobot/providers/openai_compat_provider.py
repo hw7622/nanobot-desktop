@@ -244,6 +244,7 @@ class OpenAICompatProvider(LLMProvider):
         api_key: str | None = None,
         api_base: str | None = None,
         default_model: str = "gpt-4o",
+        timeout_seconds: float | None = None,
         extra_headers: dict[str, str] | None = None,
         spec: ProviderSpec | None = None,
     ):
@@ -272,7 +273,7 @@ class OpenAICompatProvider(LLMProvider):
         # opening a fresh connection for each request, which is cheap on a
         # LAN.  Cloud providers benefit from keepalive, so we leave the
         # default pool settings for them.
-        timeout_s = _openai_compat_timeout_s()
+        timeout_s = timeout_seconds if timeout_seconds and timeout_seconds > 0 else _openai_compat_timeout_s()
         http_client: httpx.AsyncClient | None = None
         if _is_local_endpoint(spec, effective_base):
             http_client = httpx.AsyncClient(
