@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,8 @@ from nanobot.config.schema import Config
 from nanobot.session.manager import SessionManager
 
 from nanobot_desktop_backend.config_manager import load_core_runtime_config
+
+logger = logging.getLogger("nanobot_desktop.chat")
 
 
 class ChatManager:
@@ -31,6 +34,55 @@ class ChatManager:
         self._bus: MessageBus | None = None
         self._sessions: SessionManager | None = None
         self._workspace: Path | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._loop_thread: threading.Thread | None = None
+        self._loop_ready = threading.Event()
+        self._shutdown = False
+
+    def _ensure_loop(self) -> asyncio.AbstractEventLoop:
+        """Return the running background event loop, creating one if needed."""
+        if self._loop is not None and self._loop.is_running():
+            return self._loop
+
+        self._loop = asyncio.new_event_loop()
+        self._loop_ready.clear()
+        self._loop_thread = threading.Thread(
+            target=self._run_loop, daemon=True, name="chat-event-loop",
+        )
+        self._loop_thread.start()
+        self._loop_ready.wait(timeout=10)
+        return self._loop
+
+    def _run_loop(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._loop_ready.set()
+        self._loop.run_forever()
+
+    def _submit(self, coro):
+        """Submit a coroutine to the background event loop and block until done."""
+        loop = self._ensure_loop()
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        return future.result(timeout=600)
+
+    def shutdown(self) -> None:
+        """Clean up the event loop and agent resources."""
+        with self._lock:
+            self._shutdown = True
+            if self._agent is not None:
+                try:
+                    self._submit(self._agent.close_mcp())
+                except Exception:
+                    pass
+                self._agent = None
+            if self._loop is not None and self._loop.is_running():
+                self._loop.call_soon_threadsafe(self._loop.stop)
+            if self._loop_thread is not None:
+                self._loop_thread.join(timeout=5)
+                self._loop_thread = None
+            if self._loop is not None:
+                pending = [t for t in self._loop._default_executor or []]
+                self._loop.close()
+            self._loop = None
 
     def history(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -60,10 +112,12 @@ class ChatManager:
 
         resolved_session_key = (session_key or "").strip() or f"{channel}:{chat_id}"
         with self._lock:
+            if self._shutdown:
+                raise RuntimeError("ChatManager is shut down")
             self._ensure_agent_unlocked()
             assert self._agent is not None
             self._drain_outbound_unlocked()
-            response = asyncio.run(
+            response = self._submit(
                 self._agent.process_direct(
                     message,
                     session_key=resolved_session_key,
@@ -81,7 +135,7 @@ class ChatManager:
     def _history_unlocked(self, session_key: str) -> list[dict[str, Any]]:
         assert self._sessions is not None
         session = self._sessions.get_or_create(session_key)
-        return [self._serialize_message(message) for message in session.messages]
+        return [self._serialize_message(msg) for msg in session.messages]
 
     def _ensure_sessions_unlocked(self) -> None:
         payload = load_core_runtime_config()
@@ -99,7 +153,7 @@ class ChatManager:
 
         if self._agent is not None:
             try:
-                asyncio.run(self._agent.close_mcp())
+                self._submit(self._agent.close_mcp())
             except Exception:
                 pass
 

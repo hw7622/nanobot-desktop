@@ -257,6 +257,9 @@ class DesktopState:
         self.schema = build_schema()
         self._maybe_start_gateway()
 
+    def shutdown(self) -> None:
+        self.chat.shutdown()
+
     def bootstrap(self) -> dict[str, Any]:
         gateway_status = self.gateway.status()
         return {
@@ -777,14 +780,14 @@ def read_desktop_version() -> str:
     return "unknown"
 
 
-def build_server(host: str, port: int) -> ThreadingHTTPServer:
+def build_server(host: str, port: int) -> tuple[ThreadingHTTPServer, DesktopState]:
     state = DesktopState()
 
     class Handler(DesktopRequestHandler):
         pass
 
     Handler.state = state
-    return ThreadingHTTPServer((host, port), Handler)
+    return ThreadingHTTPServer((host, port), Handler), state
 
 
 def configure_logging() -> None:
@@ -942,7 +945,7 @@ def main() -> None:
     args = parser.parse_args()
 
     configure_logging()
-    server = build_server(args.host, args.port)
+    server, state = build_server(args.host, args.port)
     logging.getLogger("nanobot_desktop").info("Starting Nanobot Desktop backend on http://%s:%s", args.host, args.port)
     try:
         server.serve_forever()
@@ -950,7 +953,7 @@ def main() -> None:
         pass
     finally:
         try:
-            server.RequestHandlerClass.state.shutdown()
+            state.shutdown()
         except Exception:
             logging.getLogger("nanobot_desktop").exception("Failed during desktop shutdown cleanup")
         server.server_close()
