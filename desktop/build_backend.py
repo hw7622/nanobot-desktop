@@ -43,6 +43,8 @@ command = [
     f"{ROOT / 'nanobot' / 'skills'};nanobot/skills",
     "--add-data",
     f"{ROOT / 'nanobot' / '__init__.py'};nanobot",
+    "--collect-binaries",
+    "Crypto",
 ]
 
 raise SystemExit(subprocess.call(command, cwd=ROOT))
