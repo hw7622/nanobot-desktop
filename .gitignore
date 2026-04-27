@@ -17,13 +17,40 @@ build/
 .venv/
 venv/
 __pycache__/
-poetry.lock
 .pytest_cache/
 botpy.log
 nano.*.save
-.DS_Store
+
+# Lock files (project policy)
+poetry.lock
 uv.lock
 
+# Jupyter
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs & temp
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+
+# Desktop fork artifacts
 .pyi-temp/
 .desktop-data/
 .desktop-data-exe/
