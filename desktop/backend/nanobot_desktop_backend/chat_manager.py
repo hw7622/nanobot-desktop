@@ -80,7 +80,6 @@ class ChatManager:
                 self._loop_thread.join(timeout=5)
                 self._loop_thread = None
             if self._loop is not None:
-                pending = [t for t in self._loop._default_executor or []]
                 self._loop.close()
             self._loop = None
 
