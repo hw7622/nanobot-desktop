@@ -1,5 +1,7 @@
 """Feishu/Lark channel implementation using lark-oapi SDK with WebSocket long connection."""
 
+from __future__ import annotations
+
 import asyncio
 import importlib.util
 import json
@@ -10,9 +12,8 @@ import time
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from lark_oapi.api.im.v1.model import MentionEvent, P2ImMessageReceiveV1
 from loguru import logger
 from pydantic import Field
 
@@ -22,9 +23,11 @@ from nanobot.channels.base import BaseChannel
 from nanobot.config.paths import get_media_dir
 from nanobot.config.schema import Base
 
-from lark_oapi.core.const import FEISHU_DOMAIN, LARK_DOMAIN
-
 FEISHU_AVAILABLE = importlib.util.find_spec("lark_oapi") is not None
+FEISHU_IMPORT_ERROR: Exception | None = None
+
+if TYPE_CHECKING:
+    from lark_oapi.api.im.v1.model import MentionEvent, P2ImMessageReceiveV1
 
 # Message type display mapping
 MSG_TYPE_MAP = {
@@ -33,6 +36,24 @@ MSG_TYPE_MAP = {
     "file": "[file]",
     "sticker": "[sticker]",
 }
+
+
+def _load_feishu_sdk() -> tuple[Any, str, str] | tuple[None, None, None]:
+    """Load lark_oapi lazily so unavailable native deps do not break gateway startup."""
+    global FEISHU_AVAILABLE, FEISHU_IMPORT_ERROR
+    if not FEISHU_AVAILABLE:
+        return None, None, None
+    try:
+        import lark_oapi as lark
+        from lark_oapi.core.const import FEISHU_DOMAIN, LARK_DOMAIN
+
+        FEISHU_IMPORT_ERROR = None
+        return lark, FEISHU_DOMAIN, LARK_DOMAIN
+    except (ImportError, OSError) as e:
+        FEISHU_AVAILABLE = False
+        FEISHU_IMPORT_ERROR = e
+        logger.warning("Feishu SDK unavailable, channel will be disabled: {}", e)
+        return None, None, None
 
 
 def _extract_share_card_content(content_json: dict, msg_type: str) -> str:
@@ -291,13 +312,11 @@ class FeishuChannel(BaseChannel):
         return FeishuConfig().model_dump(by_alias=True)
 
     def __init__(self, config: Any, bus: MessageBus):
-        import lark_oapi as lark
-
         if isinstance(config, dict):
             config = FeishuConfig.model_validate(config)
         super().__init__(config, bus)
         self.config: FeishuConfig = config
-        self._client: lark.Client = None
+        self._client: Any = None
         self._ws_client: Any = None
         self._ws_thread: threading.Thread | None = None
         self._processed_message_ids: OrderedDict[str, None] = OrderedDict()  # Ordered dedup cache
@@ -313,21 +332,23 @@ class FeishuChannel(BaseChannel):
 
     async def start(self) -> None:
         """Start the Feishu bot with WebSocket long connection."""
-        if not FEISHU_AVAILABLE:
-            logger.error("Feishu SDK not installed. Run: pip install lark-oapi")
+        lark, feishu_domain, lark_domain = _load_feishu_sdk()
+        if lark is None:
+            if FEISHU_IMPORT_ERROR is not None:
+                logger.error("Feishu SDK unavailable: {}", FEISHU_IMPORT_ERROR)
+            else:
+                logger.error("Feishu SDK not installed. Run: pip install lark-oapi")
             return
 
         if not self.config.app_id or not self.config.app_secret:
             logger.error("Feishu app_id and app_secret not configured")
             return
 
-        import lark_oapi as lark
-
         self._running = True
         self._loop = asyncio.get_running_loop()
 
         # Create Lark client for sending messages
-        domain = LARK_DOMAIN if self.config.domain == "lark" else FEISHU_DOMAIN
+        domain = lark_domain if self.config.domain == "lark" else feishu_domain
         self._client = (
             lark.Client.builder()
             .app_id(self.config.app_id)
@@ -446,7 +467,7 @@ class FeishuChannel(BaseChannel):
             return None
 
     @staticmethod
-    def _resolve_mentions(text: str, mentions: list[MentionEvent] | None) -> str:
+    def _resolve_mentions(text: str, mentions: list["MentionEvent"] | None) -> str:
         """Replace @_user_n placeholders with actual user info from mentions.
 
         Args:
@@ -1506,7 +1527,7 @@ class FeishuChannel(BaseChannel):
         if self._loop and self._loop.is_running():
             asyncio.run_coroutine_threadsafe(self._on_message(data), self._loop)
 
-    async def _on_message(self, data: P2ImMessageReceiveV1) -> None:
+    async def _on_message(self, data: "P2ImMessageReceiveV1") -> None:
         """Handle incoming message from Feishu."""
         try:
             event = data.event
